@@ -44,47 +44,63 @@ def load_raw_charging(path=None):
     return df.sort_values([C.STATION_COL, C.TIME_START]).reset_index(drop=True)
 
 
-def _anomaly_mask(df, method=None, columns=None):
-    """按 IQR、3σ 或 Isolation Forest 标记异常行。"""
+def _anomaly_mask(df, method=None, columns=None, fit_ratio=None):
+    """按 IQR、3σ 或 Isolation Forest 标记异常行。
+
+    阈值只在前 ``fit_ratio`` 的时间段内估计，再应用到整段数据，保证清洗
+    规则在线部署时不会借用未来观测。
+    """
     method = method or C.ANOMALY_METHOD
     columns = list(columns or [C.UTILIZATION_COL])
+    fit_ratio = fit_ratio if fit_ratio is not None else C.TRAIN_RATIO
     mask = pd.Series(False, index=df.index)
     if method in (None, "none"):
         return mask
 
-    for col in columns:
-        if col not in df.columns:
+    for station, group in df.groupby(C.STATION_COL, sort=False):
+        if len(group) < 2:
             continue
-        values = df[col].dropna()
-        if values.empty:
-            continue
-        if method == "iqr":
-            q1, q3 = values.quantile([0.25, 0.75])
-            iqr = q3 - q1
-            lo, hi = q1 - C.IQR_K * iqr, q3 + C.IQR_K * iqr
-            mask |= ~df[col].between(lo, hi)
-        elif method == "sigma":
-            mu, sd = float(values.mean()), float(values.std())
-            if sd > 0:
-                mask |= (df[col] - mu).abs() > C.SIGMA * sd
-        elif method == "isolation_forest":
-            try:
-                from sklearn.ensemble import IsolationForest
-            except ImportError:
-                mu, sd = float(values.mean()), float(values.std())
-                mask |= (sd > 0) & ((df[col] - mu).abs() > C.SIGMA * sd)
+        fit = group.iloc[: max(2, int(len(group) * fit_ratio))]
+        local = pd.Series(False, index=group.index)
+        for col in columns:
+            if col not in group.columns:
                 continue
-            model = IsolationForest(
-                contamination=C.ISOLATION_CONTAMINATION, random_state=0
-            )
-            outlier_values = set(values[model.fit_predict(values.to_frame()) == -1])
-            mask |= df[col].isin(outlier_values)
+            fit_values = fit[col].dropna()
+            if fit_values.empty:
+                continue
+            x = group[col]
+            if method == "iqr":
+                q1, q3 = fit_values.quantile([0.25, 0.75])
+                iqr = q3 - q1
+                lo, hi = q1 - C.IQR_K * iqr, q3 + C.IQR_K * iqr
+                local |= (x < lo) | (x > hi)
+            elif method == "sigma":
+                mu = float(fit_values.mean())
+                sd = float(fit_values.std())
+                if sd > 0:
+                    local |= (x - mu).abs() > C.SIGMA * sd
+            elif method == "isolation_forest":
+                try:
+                    from sklearn.ensemble import IsolationForest
+                except ImportError:
+                    mu = float(fit_values.mean())
+                    sd = float(fit_values.std())
+                    if sd > 0:
+                        local |= (x - mu).abs() > C.SIGMA * sd
+                    continue
+                model = IsolationForest(
+                    contamination=C.ISOLATION_CONTAMINATION, random_state=0
+                )
+                model.fit(fit[[col]].dropna())
+                pred_frame = group[[col]].fillna(float(fit_values.median()))
+                local |= model.predict(pred_frame) == -1
+        mask.loc[group.index] = local
     return mask
 
 
 def clean_charging(df):
     """规则清洗保底 + 缺失填补 + 异常检测，输出重构后的会话表。"""
-    df = df.copy()
+    df = df.copy().sort_values([C.STATION_COL, C.TIME_START]).reset_index(drop=True)
 
     # 规则清洗：关键键、时间方向、物理约束先保底。
     df = df.dropna(subset=[C.STATION_COL, C.PILE_COL, C.TIME_START, C.TIME_END])
@@ -98,16 +114,10 @@ def clean_charging(df):
         | df[C.END_SOC_COL].isna()
     ]
 
-    # 缺失填补：SOC 与最大功率先按桩取中位数，再用全局中位数兜底。
+    # 缺失填补：SOC 与最大功率按桩、按时间只做前向填补，不借用未来值。
     for col in (C.START_SOC_COL, C.END_SOC_COL, C.MAX_POWER_COL):
         if col in df.columns:
-            df[col] = df.groupby(C.PILE_COL)[col].transform(
-                lambda s: s.fillna(s.median())
-            )
-            df[col] = df[col].fillna(df[col].median())
-    for col in (C.START_SOC_COL, C.END_SOC_COL):
-        if col in df.columns:
-            df[col] = df[col].fillna(df[col].median())
+            df[col] = df.groupby(C.PILE_COL, sort=False)[col].ffill()
 
     duration_hours = (
         (df[C.TIME_END] - df[C.TIME_START]).dt.total_seconds() / 3600

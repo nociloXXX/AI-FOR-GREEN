@@ -3,14 +3,19 @@
 职责：基于状态建模与预测模块的输出，决定每根桩的功率分配、排队顺序与
 充放电动作。策略按复杂度分层，低阶策略可解释、依赖少，保证链路能闭环：
 
+- causal_load_shift    在线安全的削峰填谷，只向后看，不使用任何未来信息（默认）
 - greedy_priority      规则/贪心兜底（先到先充、低 SOC 优先、最早离场优先）
-- lp_load_shift        连续功率分配的“注水法”LP，能量守恒地把峰段搬进谷段
+- lp_load_shift        连续功率分配的“注水法”LP，全量离线分析专用，禁止在线使用
 - milp_schedule        开关桩/整数变量，优先 OR-Tools/PuLP，缺失时回退贪心
-- mpc_schedule         世界模型滚动优化未来一小段，逐段重解 LP
-- battery_arbitrage    储能峰谷套利 + 削峰，带 SOC 与效率约束
+- mpc_schedule         滚动优化，仅使用预测模块给到的未来一小段“预测值”，非真实数据
+- battery_arbitrage    储能峰谷套利 + 削峰，阈值改为因果滚动均值，带 SOC 与效率约束
 
 硬约束统一为：单桩功率不超上限、场站总功率不超变压器容量、SOC 不越界、
 能量服务总量不超需求。每个策略都输出可解释的分配依据。
+
+在线评测隐藏未来数据：默认策略 ``causal_load_shift`` 与 ``greedy_priority``、
+``battery_arbitrage`` 均为因果实现，第 t 步的决策只依赖 0..t 已见数据。
+``lp_load_shift`` 需要整段曲线，只用于离线报告，上线前不要接到在线链路。
 """
 from collections import defaultdict
 
@@ -94,11 +99,47 @@ def _fill_cheapest_first(load, capacity_kw, price):
     return base + shifted
 
 
+def causal_load_shift(predicted_power_kw, capacity_kw, step_hours=None):
+    """在线安全的削峰填谷：只向后看，不使用任何未来信息。
+
+    第 t 步只依赖 0..t 的已见数据：当前负荷超过容量时，把超出电量记入
+    待服务积压；当前有裕量时优先消化之前积压。能量守恒，仅当后续没有
+    足够谷段时才把未消化的积压计为弃充。这是默认策略，可安全接入在线评测。
+    """
+    pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
+    cap = float(capacity_kw)
+    step_h = float(step_hours) if step_hours else C.STEP_MINUTES / 60.0
+    dispatch = np.zeros_like(pred)
+    backlog_kwh = 0.0
+
+    for t, load in enumerate(pred):
+        if load > cap:
+            dispatch[t] = cap
+            backlog_kwh += (load - cap) * step_h
+        else:
+            headroom = cap - load
+            serve_kw = min(backlog_kwh / step_h, headroom) if backlog_kwh > 0 else 0.0
+            dispatch[t] = load + serve_kw
+            backlog_kwh = max(backlog_kwh - serve_kw * step_h, 0.0)
+
+    deferred_kwh = float(np.maximum(pred - cap, 0.0).sum() * step_h)
+    info = {
+        "strategy": "causal_load_shift",
+        "peak_before_kw": float(pred.max()) if pred.size else 0.0,
+        "peak_after_kw": float(dispatch.max()) if dispatch.size else 0.0,
+        "shifted_kwh": float(deferred_kwh - backlog_kwh),
+        "curtailment_kwh": float(backlog_kwh),
+        "violations": int((dispatch > cap + 1e-6).sum()),
+    }
+    return dispatch, info
+
+
 def lp_load_shift(predicted_power_kw, capacity_kw, price=None, step_hours=None):
     """连续功率分配（LP）：在容量约束内能量守恒地平移负荷。
 
     返回 ``(dispatch, info)``。无电价时用注水法平滑曲线；有电价时把峰段
-    电量优先搬到最便宜的谷段，兼顾电费与碳排。
+    电量优先搬到最便宜的谷段，兼顾电费与碳排。注意：本函数按整段曲线
+    求全局水位，属于离线全量分析，在线评测禁用。
     """
     pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
     cap = float(capacity_kw)
@@ -121,7 +162,12 @@ def lp_load_shift(predicted_power_kw, capacity_kw, price=None, step_hours=None):
 
 
 def mpc_schedule(predicted_power_kw, capacity_kw, horizon_steps=None, price=None):
-    """模型预测控制：滚动窗口只取第一步，用未来一小段做有前瞻的调度。"""
+    """模型预测控制：滚动窗口只取第一步，用未来一小段预测值做有前瞻调度。
+
+    这里的前瞻只来自预测模块给出的 ``predicted_power_kw``（预测值），不会
+    读取任何未来真实数据；在线评测若要求零前瞻，直接使用默认的
+    ``causal_load_shift`` 即可。
+    """
     pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
     horizon = max(1, int(horizon_steps or getattr(C, "MPC_HORIZON_STEPS", 4)))
     prices = np.asarray(price, dtype=float).reshape(-1) if price is not None else None
@@ -147,18 +193,21 @@ def peak_shaving(
 ):
     """把超容负荷平移到谷段，保持对 pipeline 的 ``(dispatch, unmet)`` 接口稳定。
 
-    ``flexible_ratio``/``timestamps`` 仅为兼容旧调用保留；实际调度由
-    ``lp_load_shift`` 或 ``mpc_schedule`` 依据容量与电价完成，dispatch 始终
-    不超过变压器容量。
+    ``flexible_ratio``/``timestamps`` 仅为兼容旧调用保留。默认策略是零前瞻的
+    ``causal_load_shift``，保证在线评测不使用未来信息；``mpc_schedule`` 与
+    ``lp_load_shift`` 仅作显式选择，后者只能离线使用。dispatch 始终不超过
+    变压器容量。
     """
     pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
     cap = float(capacity_kw)
-    strategy = strategy or getattr(C, "DECISION_STRATEGY", "lp_load_shift")
+    strategy = strategy or getattr(C, "DECISION_STRATEGY", "causal")
 
     if strategy == "mpc":
         dispatch = mpc_schedule(pred, cap, horizon_steps=horizon_steps, price=price)
-    else:
+    elif strategy == "lp_load_shift":
         dispatch, _ = lp_load_shift(pred, cap, price=price)
+    else:
+        dispatch, _ = causal_load_shift(pred, cap)
 
     if shave_target is not None:
         dispatch = np.minimum(dispatch, float(shave_target))
@@ -363,8 +412,9 @@ def battery_arbitrage(
 ):
     """储能峰谷套利：电价高于阈值放电、低于阈值充电，并顺带压峰。
 
-    无电价时以负荷均值为阈值；始终满足 SOC 上下界与充放电效率，最后用
-    场站容量把合成后的净负荷再压一次上限。接口兼容旧的
+    阈值用“截至当前步”的滚动均值，第 i 步只依赖 0..i 已见数据，不使用
+    未来信息；始终满足 SOC 上下界与充放电效率，最后用场站容量把合成后的
+    净负荷再压一次上限。接口兼容旧的
     ``(pred, capacity_kwh, charge_kw, discharge_kw, soc0)`` 调用。
     """
     pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
@@ -377,13 +427,13 @@ def battery_arbitrage(
 
     if price is not None:
         prices = np.asarray(price, dtype=float).reshape(-1)
-        threshold = float(np.median(prices))
     else:
         prices = pred
-        threshold = float(pred.mean())
+
+    thresholds = np.cumsum(prices) / np.arange(1, pred.size + 1)
 
     for i, load in enumerate(pred):
-        if prices[i] > threshold:
+        if prices[i] > thresholds[i]:
             out = min(float(discharge_kw), max(soc - smin * cap, 0.0))
             net[i] = -out
             soc -= out

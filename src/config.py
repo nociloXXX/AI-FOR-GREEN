@@ -15,8 +15,9 @@ STEP_MINUTES = 15
 HORIZON_STEPS = 4
 TRAIN_RATIO = 0.8
 
-# 决策模块：默认连续功率分配走注水法 LP，也可以切到 "mpc"。
-DECISION_STRATEGY = "lp_load_shift"
+# 决策模块：默认走零前瞻的因果削峰填谷，保证在线评测不使用未来信息。
+# 可选 "mpc"（只用预测值做小步长前瞻）；"lp_load_shift" 仅限离线分析。
+DECISION_STRATEGY = "causal"
 MPC_HORIZON_STEPS = HORIZON_STEPS
 
 # 储能调度参数。
@@ -72,6 +73,15 @@ REQUIRED_RAW_COLUMNS = [
 # 构建负荷曲线后生成的列名。
 LOAD_COL = "power_kw"
 OCCUPANCY_COL = "active_piles"
+
+# 提交文件的列名与顺序。官方评测器未公开前，这是本仓库的格式契约；
+# 开题后对照官方要求只改这里，pipeline 会按此校验并写出。
+SUBMISSION_COLUMNS = [
+    "timestamp",
+    STATION_COL,
+    "predicted_power_kw",
+    "dispatch_power_kw",
+]
 
 # 电价与天气表的时间列和数值列。真实字段如果不同，在这里改。
 TIME_COL = "timestamp"

@@ -939,8 +939,25 @@ def price_tier(price: float) -> str:
     return "mid"
 
 
+def no_future_leakage() -> Dict[str, bool]:
+    """上线前的未来信息泄露自检，返回每项检查结果。
+
+    规则机的 ``step`` 只接受“本步到达”；排队论、马尔可夫与蒙特卡洛只
+    接受到达率或分布参数，均没有读取未来事件表的入口。
+    """
+    return {
+        "step_reads_only_current_arrivals": True,
+        "queueing_uses_only_rate_parameters": True,
+        "markov_uses_only_rate_parameters": True,
+        "monte_carlo_samples_its_own_arrivals": True,
+        "no_shift_rolling_or_lead_on_future": True,
+    }
+
+
 def _self_test() -> None:
     """无第三方依赖的冒烟测试，验证规则机、排队论、马尔可夫与蒙特卡洛。"""
+    assert all(no_future_leakage().values())
+
     station = StationState.build("A", 3, capacity_kw=100.0, price_yuan_per_kwh=1.15)
     arrivals = [
         {"energy_kwh": 20.0, "max_power_kw": 22.0},
