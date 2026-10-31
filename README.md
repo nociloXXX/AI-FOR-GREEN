@@ -37,3 +37,14 @@ git push origin main
 - 开始工作前先 `git pull`，避免冲突。
 - 如果 push 被拒，先 `git pull` 再 push。
 - 不习惯命令行的话，可以装 GitHub Desktop（https://desktop.github.com/ ）用图形界面克隆和提交。
+
+## 基线模块结构
+
+1. 数据处理：`src/data_loader.py` + `src/features.py`
+2. 预测：`src/predict.py`
+3. 世界模型：`src/state_model.py`
+4. 干预推演：`src/intervention.py`
+5. 充电决策：`src/decision.py`
+
+端到端入口是 `src/pipeline.py`，运行 `python -m src.pipeline`；运行效果报告用
+`python -m src.report` 生成到 `submissions/report.html`。

@@ -216,6 +216,34 @@ def peak_shaving(
     return dispatch, unmet
 
 
+CANDIDATE_STRATEGIES = ("causal", "mpc", "lp_load_shift")
+
+_PLAN_FIELDS = (
+    "name",
+    "score",
+    "violations",
+    "peak_before_kw",
+    "peak_after_kw",
+    "overflow_kwh",
+    "curtailment_kwh",
+    "unmet_kwh",
+    "station_id",
+    "num_piles",
+    "available_capacity_kw",
+)
+
+
+def _clean_plan_info(info):
+    """把干预推演返回的信息整理成可 JSON 序列化的结构。"""
+    plan_info = {key: info[key] for key in _PLAN_FIELDS if key in info}
+    plan_info["selected_strategy"] = info.get("name")
+    rows = []
+    for row in info.get("candidates", []):
+        rows.append({key: row[key] for key in _PLAN_FIELDS if key in row})
+    plan_info["candidates"] = rows
+    return plan_info
+
+
 def choose_dispatch(
     predicted_power_kw,
     capacity_kw,
@@ -232,7 +260,15 @@ def choose_dispatch(
     from .intervention import evaluate_candidates
 
     pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
-    names = list(getattr(C, "INTERVENTION_CANDIDATES", ["causal", "mpc"]))
+    names = list(getattr(C, "INTERVENTION_CANDIDATES", ["causal", "mpc"])) or [
+        "causal"
+    ]
+    unknown = [name for name in names if name not in CANDIDATE_STRATEGIES]
+    if unknown:
+        raise ValueError(
+            f"INTERVENTION_CANDIDATES 含未知策略 {unknown}，"
+            f"可选策略为 {list(CANDIDATE_STRATEGIES)}"
+        )
 
     candidates = []
     for name in names:
@@ -243,8 +279,7 @@ def choose_dispatch(
         pred, candidates, capacity_kw, step_hours, state=state
     )
     unmet = np.maximum(pred - dispatch, 0.0)
-    info["selected_strategy"] = info.get("name")
-    return dispatch, unmet, info
+    return dispatch, unmet, _clean_plan_info(info)
 
 
 PRIORITY_KEYS = {

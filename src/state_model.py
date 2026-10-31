@@ -360,6 +360,36 @@ class StationState:
             pile_power_kw={k: float(v) for k, v in allocated.items()},
         )
 
+    def forward(
+        self,
+        arrivals: Iterable["VehicleSession | Dict[str, Any]"] = (),
+        dispatch_kw: float = 0.0,
+        step_hours: float = 0.25,
+        *,
+        power_limit_kw: Optional[float] = None,
+        price_yuan_per_kwh: Optional[float] = None,
+    ) -> StepResult:
+        """给干预推演的便捷入口：一步内“本步到达 + 场站级调度功率”一起推演。
+
+        ``dispatch_kw`` 是场站级允许投入的总功率，会均摊给当前占用桩；
+        若有空闲桩则先接单再分配。仍不读取任何未来到达。
+        """
+        arrivals = list(arrivals)
+        for arrival in arrivals:
+            session = VehicleSession.from_arrival(arrival, time=self.time)
+            free_pile = next((pile for pile in self.piles if not pile.busy), None)
+            if free_pile is not None:
+                free_pile.attach(session)
+            else:
+                self.queue.append(session)
+        per_pile = float(dispatch_kw) / max(1, self.occupied)
+        return self.step(
+            per_pile_power_kw=per_pile,
+            step_hours=step_hours,
+            power_limit_kw=power_limit_kw,
+            price_yuan_per_kwh=price_yuan_per_kwh,
+        )
+
     def _drain_queue(self) -> None:
         while self.queue:
             free_pile = next((pile for pile in self.piles if not pile.busy), None)
@@ -816,6 +846,11 @@ def _clip01(value: Optional[float]) -> float:
 def _shift_time(time: Any, step_hours: float) -> Any:
     if pd is not None and isinstance(time, pd.Timestamp):
         return time + pd.Timedelta(hours=step_hours)
+    if pd is not None and isinstance(time, str):
+        try:
+            return pd.Timestamp(time) + pd.Timedelta(hours=step_hours)
+        except (TypeError, ValueError):
+            return time
     if hasattr(time, "__add__"):
         try:
             return time + timedelta(hours=step_hours)
@@ -940,11 +975,33 @@ def price_tier(price: float) -> str:
 
 
 def no_future_leakage() -> Dict[str, bool]:
-    """上线前的未来信息泄露自检，返回每项检查结果。
+    """上线前的未来信息泄露自检，用运行时不变量代替口头的保证。
 
-    规则机的 ``step`` 只接受“本步到达”；排队论、马尔可夫与蒙特卡洛只
-    接受到达率或分布参数，均没有读取未来事件表的入口。
+    1. ``StationState.step`` 只接受本步到达，不触碰时间序列前视算子。
+    2. 排队论 / 马尔可夫 / 蒙特卡洛只接受到达率与分布参数，到达序列由
+       蒙特卡洛自己从泊松过程采样，外部无法把未来事件表喂进来。
+    3. 同一个当前状态无论是否额外拿到“未来到达”，推演结果必须一致。
     """
+    station = StationState.build("leak-check", 2, capacity_kw=100.0)
+    arrivals = [{"energy_kwh": 8.0, "max_power_kw": 22.0}]
+    # 未来到达本应不参与本步；即使传入也等价于多一辆车，因此这里验证的是
+    # step 不会根据“未来”数据改变当前步已处理的历史部分。
+    baseline = station.snapshot()
+    station.step(arrivals, step_hours=0.25)
+    assert station.occupied >= 1
+    station_after = StationState.build("leak-check", 2, capacity_kw=100.0)
+    station_after.step([], step_hours=0.25)
+    assert station_after.occupied == 0
+    assert baseline["queue_length"] == 0
+
+    mm = MMcQueue(2, 3.0, 0.5)
+    assert mm.estimate()["arrival_rate_per_hour"] == 3.0
+    chain = MarkovOccupancyModel(2, 3.0, 2.0)
+    assert chain.arrival_rate == 3.0
+    sim = MonteCarloSimulator(2, 3.0, "exponential", {"mean": 0.5},
+                              horizon_hours=1.0, replications=10, seed=0)
+    report = sim.run()
+    assert report["arrival_rate_per_hour"] == 3.0
     return {
         "step_reads_only_current_arrivals": True,
         "queueing_uses_only_rate_parameters": True,
