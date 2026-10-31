@@ -70,6 +70,10 @@ _SAFETY_MARGIN_STEPS = 1.0
 # 这里保守地把 dwell 估计缩短（假设车辆可能提前离开），完成率优先。
 DWELL_SAFETY_FACTOR = 0.8
 
+# demand 点预测在 office1 等小样本站可能明显低估：保守放大剩余需求，
+# 让“必要功率”与延后资格按更保守的口径计算，避免过早停止或过度延后。
+DEMAND_SAFETY_FACTOR = 1.5
+
 # 价格延后总开关：False 时 act 退化为纯完成率优先的尽快充，便于 A/B。
 PRICE_DEFERRAL_ENABLED = True
 
@@ -98,14 +102,19 @@ def act_edf(observation, predict_fn, price_deferral=None):
             _finite(pred.demand_kwh, 0.0) - _finite(vehicle.delivered_kwh, 0.0),
             0.0,
         )
-        dwell_safe_hours = max(
-            _finite(pred.dwell_hours, dt) * DWELL_SAFETY_FACTOR,
-            dt,
-        )
+        dwell_hours = _finite(pred.dwell_hours, dt)
         steps_left = max(
             1,
             math.ceil(
-                dwell_safe_hours / dt
+                dwell_hours / dt
+                - _finite(vehicle.elapsed_steps, 0.0)
+            ),
+        )
+        dwell_conservative = max(dwell_hours * DWELL_SAFETY_FACTOR, dt)
+        steps_left_conservative = max(
+            1,
+            math.ceil(
+                dwell_conservative / dt
                 - _finite(vehicle.elapsed_steps, 0.0)
             ),
         )
@@ -118,9 +127,16 @@ def act_edf(observation, predict_fn, price_deferral=None):
             base = limit
             deferrable = False
         else:
+            remaining_conservative = remaining * DEMAND_SAFETY_FACTOR
             time_to_finish = remaining / (limit * dt)
+            time_to_finish_conservative = remaining_conservative / (limit * dt)
             laxity = steps_left - time_to_finish
-            necessary = min(limit, remaining / (steps_left * dt))
+            laxity_conservative = (
+                steps_left_conservative - time_to_finish_conservative
+            )
+            necessary = min(
+                limit, remaining_conservative / (steps_left_conservative * dt)
+            )
             base = min(limit, remaining / dt)
             if laxity <= _SAFETY_MARGIN_STEPS:
                 # 现在已紧：立即满充，不参与价格延后。
@@ -128,7 +144,9 @@ def act_edf(observation, predict_fn, price_deferral=None):
                 deferrable = False
             else:
                 wanted = base
-                deferrable = True
+                # 只有按保守 dwell（假设可能提前离开）仍有松弛时，才允许延后，
+                # 避免 dwell 点预测高估把车辆误判成“有松弛”而少充。
+                deferrable = laxity_conservative > _SAFETY_MARGIN_STEPS
 
         cars.append(
             {
