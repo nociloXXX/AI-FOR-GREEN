@@ -35,14 +35,34 @@ def _ev_capacity_kw(observation):
     return max(capacity - background, 0.0)
 
 
-def _cheap_now(prices):
-    """当前电价是否不高于今日剩余时段的电价中位数。"""
-    if not prices:
-        return True
-    future = np.asarray([float(p) for p in prices[1:]], dtype=float)
-    if future.size == 0:
-        return True
-    return float(prices[0]) <= float(np.median(future))
+def _green_signal(observation, horizon_steps=8):
+    """返回 (当前是否便宜, 未来近期容量是否比现在更紧)。
+
+    便宜：当前价不高于今日剩余时段电价中位数。容量变紧：未来 horizon 步内
+    的最小 EV 可用容量（forecast_capacity - forecast_background）低于当前值，
+    此时即使电价不低也应提前多充，避免未来被容量卡住。
+    """
+    prices = getattr(observation, "prices", ()) or ()
+    if prices:
+        future = np.asarray([float(p) for p in prices[1:]], dtype=float)
+        cheap = future.size == 0 or float(prices[0]) <= float(np.median(future))
+    else:
+        cheap = True
+
+    current_ev = _ev_capacity_kw(observation)
+    fc = getattr(observation, "forecast_capacity", ()) or ()
+    fb = getattr(observation, "forecast_background", ()) or ()
+    tight_ahead = False
+    if fc:
+        horizon = min(len(fc) - 1, max(1, int(horizon_steps)))
+        headrooms = []
+        for i in range(1, horizon + 1):
+            cap = _finite(fc[i], current_ev)
+            bg = _finite(fb[i], 0.0) if i < len(fb) else 0.0
+            headrooms.append(max(cap - bg, 0.0))
+        if headrooms:
+            tight_ahead = min(headrooms) < current_ev
+    return cheap, tight_ahead
 
 
 def _price_advantage(prices, steps_left):
@@ -56,9 +76,6 @@ def _price_advantage(prices, steps_left):
         return 0.0
     return float(np.median(future)) - current
 
-
-# 松弛时间不超过这一步数的车辆视为“紧迫”：保持满功率，不参与电价延后。
-_URGENT_SLACK_STEPS = 2.0
 
 # slack 粗排序步长：所有车先按 0.5 步分桶保住 least-slack 的完成率，
 # 桶内再用 TOPSIS（剩余需求、停留、电价）精排做多指标权衡。
@@ -96,7 +113,7 @@ def act_edf(observation, predict_fn):
         dt = 0.25
 
     prices = getattr(observation, "prices", ()) or ()
-    cheap = _cheap_now(prices)
+    cheap, tight_ahead = _green_signal(observation)
 
     rows = []
     for vehicle in observation.vehicles:
@@ -128,9 +145,9 @@ def act_edf(observation, predict_fn):
             demand_steps = remaining / (limit * dt)
             slack = steps_left - demand_steps
             just_in_time = remaining / (steps_left * dt)
-            if slack <= _URGENT_SLACK_STEPS:
+            if slack <= 0:
                 wanted = limit
-            elif cheap:
+            elif cheap or tight_ahead:
                 wanted = limit
             else:
                 wanted = min(just_in_time, limit)

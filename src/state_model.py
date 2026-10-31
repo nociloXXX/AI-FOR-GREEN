@@ -328,17 +328,20 @@ class StationState:
         allocated = _allocate_power(requested, limit, self.power_policy)
 
         served_energy = 0.0
-        requested_energy = 0.0
+        curtailed_energy = 0.0
         completions = 0
         for pile in self.piles:
             if not pile.busy:
                 continue
             power = allocated.get(pile.pile_id, 0.0)
             available = power * step_hours
-            requested_energy += min(
-                pile.max_power_kw, requested[pile.pile_id]
-            ) * step_hours
             applied = min(available, pile.remaining_energy_kwh)
+            # 弃充只算容量削减部分：不受变压器限制时本可充的功率与实得
+            # 功率之差。电池已满导致的“想要但不必给”不记入弃充。
+            unconstrained_power = min(
+                pile.max_power_kw, pile.remaining_energy_kwh / max(step_hours, 1e-9)
+            )
+            curtailed_energy += max(unconstrained_power - power, 0.0) * step_hours
             pile.remaining_energy_kwh -= applied
             served_energy += applied
 
@@ -351,7 +354,7 @@ class StationState:
 
         return StepResult(
             served_energy_kwh=float(served_energy),
-            curtailed_energy_kwh=float(max(0.0, requested_energy - served_energy)),
+            curtailed_energy_kwh=float(max(0.0, curtailed_energy)),
             arrivals=len(arrivals),
             completions=completions,
             queue_length=self.queue_length,
@@ -1032,6 +1035,20 @@ def _self_test() -> None:
     snap = station.snapshot()
     assert snap["price_tier"] == "high"
     assert all(p["current_soc"] is not None for p in snap["piles"] if p["busy"])
+
+    # 弃充口径：电池已满导致的“想要但不必给”不记弃充。
+    tiny = StationState.build("full", 1, capacity_kw=100.0)
+    tiny.step([{"energy_kwh": 1.0, "max_power_kw": 22.0}], step_hours=0.25)
+    assert tiny.snapshot()["occupied_piles"] == 0
+    assert tiny.snapshot()["queue_length"] == 0
+
+    # 容量受限时，削减的功率才会折算成弃充电量。
+    limited = StationState.build("limited", 1, capacity_kw=5.0)
+    limited_result = limited.step(
+        [{"energy_kwh": 10.0, "max_power_kw": 22.0}], step_hours=0.25
+    )
+    assert limited_result.curtailed_energy_kwh > 0
+    assert limited_result.served_energy_kwh == 1.25
 
     mm = MMcQueue(3, 4.0, 0.5).metrics()
     assert mm.utilization <= 1.0 and mm.probability_wait < 1.0
