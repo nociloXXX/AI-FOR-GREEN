@@ -241,13 +241,29 @@ def _finite_array(values):
     )
 
 
+def _safe_nanmean(values):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    return float(arr.mean()) if arr.size else np.nan
+
+
+def _safe_nanpercentile(values, p):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    return float(np.percentile(arr, p)) if arr.size else np.nan
+
+
 def _curve_profile(samples, start_ns, dwell_h, progress_bins, elapsed_edges):
     """从一条曲线的样本提取特征分量，返回与特征名同长的单曲线向量。"""
     import pandas as pd
 
-    timestamps = pd.to_datetime(
-        [s["timestamp_utc"] for s in samples], utc=True
-    ).astype(np.int64).to_numpy()
+    timestamps = (
+        pd.to_datetime([s["timestamp_utc"] for s in samples])
+        .tz_localize(None)
+        .astype("datetime64[ns]")
+        .astype(np.int64)
+        .to_numpy()
+    )
     current = _finite_array([s.get("current_a") for s in samples])
     power = _finite_array([s.get("power_kw_observed") for s in samples])
     voltage = _finite_array([s.get("voltage_v") for s in samples])
@@ -361,6 +377,7 @@ def build_site_profile_features(timeseries_dir=None, progress_bins=10):
                 )
                 n = int(per[0])
                 sample_counts.append(n)
+                dwells.append(dwell_h)
                 interval_means.append(per[1])
                 charges.append(per[2])
                 energies.append(per[3])
@@ -376,41 +393,44 @@ def build_site_profile_features(timeseries_dir=None, progress_bins=10):
                 miss_power.append(per[-2])
                 miss_voltage.append(per[-1])
 
-        dwells = _finite_array(dwells)
-        charges = _finite_array(charges)
-        energies = _finite_array(energies)
-        interval_means = _finite_array(interval_means)
         n_curves = len(sample_counts)
         n_samples = int(sum(sample_counts))
         mean_samples = n_samples / n_curves if n_curves else np.nan
-        mean_interval = float(np.nanmean(interval_means))
+        mean_interval = _safe_nanmean(interval_means)
         miss_cur = float(np.mean(_finite_array(miss_current))) if miss_current else np.nan
         miss_pow = float(np.mean(_finite_array(miss_power))) if miss_power else np.nan
         miss_vol = float(np.mean(_finite_array(miss_voltage))) if miss_voltage else np.nan
 
         shape_mean = np.full(progress_bins, np.nan)
         if shapes:
-            shape_mean = np.nanmean(np.vstack(shapes), axis=0)
+            shape_stack = np.vstack(shapes)
+            for b in range(progress_bins):
+                shape_mean[b] = _safe_nanmean(shape_stack[:, b])
         elapsed_mean = np.full(len(elapsed_edges) - 1, np.nan)
         mask = elapsed_counts > 0
         elapsed_mean[mask] = elapsed_sums[mask] / elapsed_counts[mask]
-
-        def q(values, p):
-            return float(np.nanpercentile(values, p)) if len(values) else np.nan
 
         profiles[site] = np.concatenate(
             [
                 [n_curves, n_samples, mean_samples, mean_interval],
                 [miss_pow, miss_vol, miss_cur],
                 [
-                    q(dwells, 50), q(dwells, 25), q(dwells, 75), float(np.nanmean(dwells)) if len(dwells) else np.nan,
-                    q(charges, 50),
+                    _safe_nanpercentile(dwells, 50),
+                    _safe_nanpercentile(dwells, 25),
+                    _safe_nanpercentile(dwells, 75),
+                    _safe_nanmean(dwells),
+                    _safe_nanpercentile(charges, 50),
                 ],
-                [q(energies, 50), q(energies, 25), q(energies, 75), float(np.nanmean(energies)) if len(energies) else np.nan],
+                [
+                    _safe_nanpercentile(energies, 50),
+                    _safe_nanpercentile(energies, 25),
+                    _safe_nanpercentile(energies, 75),
+                    _safe_nanmean(energies),
+                ],
                 shape_mean,
                 [
-                    float(np.nanmean(_finite_array(tapers_ratio))),
-                    float(np.nanmean(_finite_array(tapers_slope))),
+                    _safe_nanmean(tapers_ratio),
+                    _safe_nanmean(tapers_slope),
                 ],
                 elapsed_mean,
             ]
