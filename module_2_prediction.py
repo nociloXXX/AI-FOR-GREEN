@@ -331,8 +331,14 @@ class PredictionModule:
 
     def arrival_rate(self, site, hour, weekday):
         table, nbins = self.arrival_rates[site]
-        hour = float(hour) % 24.0
-        weekday = int(weekday) % 7
+        hour = float(hour)
+        if not np.isfinite(hour):
+            hour = 0.0
+        hour = hour % 24.0
+        try:
+            weekday = int(weekday) % 7
+        except (TypeError, ValueError):
+            weekday = 0
         if nbins == 96:
             bin_idx = int(np.rint(hour * 4.0)) % 96
         else:

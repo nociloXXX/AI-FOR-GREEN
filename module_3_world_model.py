@@ -32,6 +32,14 @@ def _finite(value, default=0.0, allow_inf=False):
     return value
 
 
+def _step_hour_weekday(observation, step, dt):
+    """安全计算推演步的当地时刻与星期，非法输入一律归一。"""
+    local_hour = _finite(observation.local_hour, default=0.0)
+    weekday = int(_finite(observation.weekday, default=0.0))
+    hour = (local_hour + step * dt) % 24.0
+    return hour, (weekday + int((local_hour + step * dt) // 24)) % 7
+
+
 def _remaining_steps(pred: Prediction, dt_hours: float, elapsed_steps: int) -> int:
     """预测剩余停留步数，至少保留一步，避免零除与车辆提前消失。"""
     dwell = _finite(getattr(pred, "dwell_hours", 0.0), default=dt_hours)
@@ -66,11 +74,7 @@ def _arrival_counts(observation, horizon_steps, arrival_rate_fn, quantiles):
     horizon = max(0, int(_finite(horizon_steps, default=0.0)))
     counts = {level: [0] * horizon for level in quantiles}
     for step in range(horizon):
-        hour = (observation.local_hour + step * dt) % 24.0
-        weekday = (
-            observation.weekday
-            + int((observation.local_hour + step * dt) // 24)
-        ) % 7
+        hour, weekday = _step_hour_weekday(observation, step, dt)
         rate = max(_finite(arrival_rate_fn(observation.site, hour, weekday)), 0.0)
         for level in quantiles:
             counts[level][step] = _poisson_quantile(rate, level)
@@ -114,11 +118,7 @@ def _rollout_with_counts(
     loads = []
     active = []
     for step in range(horizon):
-        hour = (observation.local_hour + step * dt) % 24.0
-        weekday = (
-            observation.weekday
-            + int((observation.local_hour + step * dt) // 24)
-        ) % 7
+        hour, weekday = _step_hour_weekday(observation, step, dt)
         for _ in range(int(arrival_counts[step])):
             features = ArrivalFeatures("forecast", observation.site, hour, weekday, 6.6)
             pred = (injected_predict or predict_fn)(features)
@@ -179,11 +179,7 @@ def rollout(
         counts = [0] * horizon
         acc = 0.0
         for step in range(horizon):
-            hour = (observation.local_hour + step * dt) % 24.0
-            weekday = (
-                observation.weekday
-                + int((observation.local_hour + step * dt) // 24)
-            ) % 7
+            hour, weekday = _step_hour_weekday(observation, step, dt)
             acc += max(_finite(arrival_rate_fn(observation.site, hour, weekday)), 0.0)
             while acc >= 1.0:
                 counts[step] += 1
