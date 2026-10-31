@@ -444,3 +444,18 @@
 关键提醒：Genov 2024 指出 GMM 表现受数据量约束，office1 仅 919 行，**优先用 Similar Sessions / 经验分位，不硬上 GMM**。
 
 2.3 落地顺序：先做 Similar Sessions 近邻作为 office1 对照 → `module_3` 未来到达条件抽样（经验分位起步，数据足再上 GMM）→ 与 2.1 的 pooled LightGBM 对比后决定保留哪个。
+
+## 17. 3.1 轮方案（P0 已过闸门）
+
+> 现状：completion_proxy 三站四条件全 PASS，office1 arrival_burst 修复到 0.909+；defer 开/关不回退；offline_intervention_eval 自检 effect skill>0 且 natural/capacity_edf 同采样。P0 无剩余硬风险，以下按“不破坏完成率闸门”排序推进 P1。
+
+| 顺序 | P1 项 | 论文映射 | 模块会话 | 落地动作与护栏 |
+| --- | --- | --- | --- | --- |
+| 1 | demand/dwell 分位数 q75/q90 | Zhang 2020、Applied Energy 2020 概率预测、Cai 2022 | `module_2` → `module_5` | `HistGradientBoostingRegressor(loss="quantile")` 出 q50/q75/q90；q75/q90 给 LLF 保守 deadline；改后重跑 completion_proxy，defer 开/关不回退 |
+| 2 | 未来到达条件密度/GMM 注入 | ACN-Data 2019、Genov 2024 | `module_3` | 先经验分位、数据足再 GMM；natural 与 capacity_edf 必须同采样同策略 |
+| 3 | TOU 两阶段削峰 | Energy Informatics 2023、Cai 2022 | `module_5` | 完成基线满足后再按电价延后，做成开关，completion_proxy 通过才启用 |
+| 4 | 容量前瞻 MPC | Lee 2021 ACN、Energy Informatics 2023 | `module_5` | 用 `forecast_capacity` 对低容量场景提前充；无可行解回退 EDF/LLF |
+| 5 | KM 停留时长离线诊断 | Time Matters 2026 | `module_2` 离线 | numpy 手写 KM，只标定 dwell 分位，不接在线 |
+| 6 | 干预双基线调优 | Lee 2021 ACN、Energy Informatics 2023 | `module_4` | 已自检 effect skill>0，保持 natural/capacity_edf 同采样即可 |
+
+护栏：每完成 1 项就跑 completion_proxy 与 offline_intervention_eval，任一闸门回退即停止后续派发。

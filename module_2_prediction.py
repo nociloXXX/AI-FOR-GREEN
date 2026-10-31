@@ -75,8 +75,15 @@ def _fit_booster(x, y, num_leaves):
     return model.booster_
 
 
-def _fit_hist_quantile(x, y, q=0.5):
+def _fit_hist_quantile(x, y, q=0.5, log_target=False):
     from sklearn.ensemble import HistGradientBoostingRegressor
+
+    class _LogTargetModel:
+        def __init__(self, model):
+            self.model = model
+
+        def predict(self, data):
+            return np.expm1(self.model.predict(data))
 
     model = HistGradientBoostingRegressor(
         loss="quantile",
@@ -86,7 +93,10 @@ def _fit_hist_quantile(x, y, q=0.5):
         l2_regularization=1.0,
         random_state=0,
     )
-    model.fit(x, y)
+    target = np.log1p(np.asarray(y, dtype=float)) if log_target else np.asarray(y, dtype=float)
+    model.fit(x, target)
+    if log_target:
+        return _LogTargetModel(model)
     return model
 
 
@@ -218,6 +228,7 @@ class PredictionModule:
 
         self.arrival_rates = _build_arrival_rates(training)
         self.demand_quantiles = {}
+        self.dwell_quantiles = {}
         for site in _SITES:
             frame = training[site]
             xb = _features_base(
@@ -225,6 +236,10 @@ class PredictionModule:
             )
             self.demand_quantiles[site] = {
                 q: _fit_hist_quantile(xb, frame.demand_kwh.to_numpy(), q)
+                for q in _QUANTILE_LEVELS
+            }
+            self.dwell_quantiles[site] = {
+                q: _fit_hist_quantile(xb, frame.dwell_hours.to_numpy(), q, log_target=True)
                 for q in _QUANTILE_LEVELS
             }
         self._cache = {}
@@ -280,12 +295,14 @@ class PredictionModule:
         x = _features_base(
             [features.hour], [features.weekday], [features.charger_limit_kw]
         )
-        dwell = float(self._model_predict(self.dwell_fallback[features.site], x)[0])
-        models = self.demand_quantiles[features.site]
+        demand_models = self.demand_quantiles[features.site]
+        dwell_models = self.dwell_quantiles[features.site]
         out = {}
         for q in levels:
-            model = models.get(float(q)) or models[0.5]
-            demand = float(self._model_predict(model, x)[0])
+            demand_model = demand_models.get(float(q)) or demand_models[0.5]
+            dwell_model = dwell_models.get(float(q)) or dwell_models[0.5]
+            demand = float(self._model_predict(demand_model, x)[0])
+            dwell = float(self._model_predict(dwell_model, x)[0])
             out[q] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),

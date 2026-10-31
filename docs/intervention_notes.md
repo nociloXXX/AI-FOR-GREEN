@@ -22,3 +22,18 @@
 
 结论：干预响应差的改善空间来自需求/停留/到达预测精度（模块2），而不是容量内
 分配顺序。因此提交默认保留官方一致的 EDF；`strategy="slack"` 仅作为离线消融保留。
+
+## 第 4 条前置验收（effect skill）
+
+`offline_intervention_eval.py` 固化结果：固定 caltech 5 辆在场车辆 + 前 4 步容量
+8kW、随后 200kW，`natural` 与 `capacity_edf` 同采样（predict 注入序列各 165 次且
+完全一致），响应差非零（先限流后回补）。
+
+- zero_effect_error = 38.6667
+- our_effect_error = 0.0000
+- effect_skill = 1.0000
+- copy_natural_skill = 0.0000
+
+`natural` 与 `capacity_edf` 共用同一确定性 `rollout`（无随机数、无随机到达采样），
+因此“同种子/同场景/同注入”自然成立；未来到达由同一累积期望到达数注入，不会被
+采样噪声污染。

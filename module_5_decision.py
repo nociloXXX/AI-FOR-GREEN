@@ -38,8 +38,13 @@ def _ev_capacity_kw(observation):
     return max(capacity - background, 0.0)
 
 
-def _green_signal(observation, horizon_steps=8):
-    """返回 (当前是否便宜, 未来近期容量是否比现在更紧)。"""
+def _green_signal(observation, horizon_steps=None):
+    """返回 (当前是否便宜, 未来近期容量是否比现在更紧)。
+
+    容量前瞻 MPC：若未来 horizon 步内 forecast_capacity - forecast_background
+    的最小值低于当前可用容量，说明近期会被容量卡住，返回 tight_ahead=True，
+    让决策提前充；分配顺序始终是 LLF，因此前瞻不可行时自然回退到 LLF。
+    """
     prices = getattr(observation, "prices", ()) or ()
     if prices:
         future = [float(p) for p in prices[1:]]
@@ -52,7 +57,10 @@ def _green_signal(observation, horizon_steps=8):
     fb = getattr(observation, "forecast_background", ()) or ()
     tight_ahead = False
     if fc:
-        horizon = min(len(fc) - 1, max(1, int(horizon_steps)))
+        horizon = min(
+            len(fc) - 1,
+            max(1, int(horizon_steps if horizon_steps is not None else MPC_HORIZON_STEPS)),
+        )
         headrooms = []
         for i in range(1, horizon + 1):
             cap = _finite(fc[i], current_ev)
@@ -65,6 +73,9 @@ def _green_signal(observation, horizon_steps=8):
 
 # laxity 不超过该步数视为“现在已紧”：立即满充、禁止价格延后。
 _SAFETY_MARGIN_STEPS = 1.0
+
+# 容量前瞻 MPC 的前瞻步数：看未来这几步的 forecast_capacity 是否比现在更紧。
+MPC_HORIZON_STEPS = 8
 
 # 价格延后门槛：只有保守松弛超过该步数才允许延后，给 dwell/demand 误差留缓冲。
 _DEFER_MARGIN_STEPS = 3.0
