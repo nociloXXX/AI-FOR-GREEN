@@ -46,14 +46,14 @@ class FiveModuleModel:
             "method": (
                 "five-module online model: data features -> ExtraTrees demand/dwell "
                 "+ weekday-hour arrivals -> physics world model -> counterfactual "
-                "capacity rollout -> slack-bucketed TOPSIS (remaining/dwell/price) + TOU price-aware charging decision"
+                "capacity rollout -> least-laxity-first + TOU price-aware charging decision"
             ),
             "assumptions": [
                 "charger limit is known at arrival",
                 "demand and dwell are unchanged by the capacity intervention",
                 "future arrivals are modeled from public history, not known in advance",
                 "price-aware deferral only applies when a vehicle still has spare dwell slack, so completion outranks cost",
-                "TOPSIS priority is applied within small slack buckets so completion order is preserved",
+                "least-laxity-first protects at-risk vehicles; price deferral only applies to vehicles with positive laxity",
             ],
             "limitations": [
                 "arrival features cannot capture all driver intent",

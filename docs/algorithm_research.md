@@ -400,3 +400,47 @@
 - 约束优先：完成率硬约束 > 峰值/成本目标；Energy Informatics 2023 的目标 `min ||目标负荷 - 实际负荷||²` 只在完成基线满足后作用于剩余灵活性。
 - 用 2022 概率预测思路：dwell/energy 的分位预测决定“多少松弛可以安全被移动”。
 - 验收：先看完成率不回退，再看峰值/成本改善；二者冲突时以完成率为准。
+
+## 14. P1 论文库与合规映射（2.2 轮）
+
+| 论文 | 类型 | 合规性 | 对应模块/文件 | 2.2 落地动作 |
+| --- | --- | --- | --- | --- |
+| Zhang 2020 分位数→密度组合 | 分位预测 + 核密度组合 | 合规 | `module_2_prediction.py`、`module_3_world_model.py` | q50/q75/q90 输出，必要时组合成条件密度供未来到达抽样 |
+| Time Matters 2026 生存分析 | 非参数 Kaplan-Meier 离线诊断 | 合规，仅离线，`lifelines` 未预装 | `module_2_prediction.py`、`module_3_world_model.py` | numpy 手写 KM 做停留时长诊断，不接在线路径 |
+| Lee 2021 ACN 在线 vs 离线完美信息 | 凸优化 + MPC + 离线最优基准 | 在线用预测值合规；离线完美信息仅报告/对照 | `module_4_intervention.py`、`module_5_decision.py` | capacity_edf 作在线反事实；离线完美信息只写 explain 对照 |
+| Energy Informatics 2023 MPC 负荷塑形 | MPC 约束负荷塑形 | 合规，用 forecast_capacity/prices | `module_4_intervention.py`、`module_5_decision.py` | 完成基线满足后做负荷塑形，不牺牲完成率 |
+| ACN 逐车完成率定义 + EDF 基线 | 完成率口径 + 调度基线 | 合规 | `module_5_decision.py`、`public_self_eval.py` | 逐车“剩余未交付 ≤3% 目标电量”口径对齐官方，EDF/LLF 对比 |
+
+2.2 落地顺序：先跑通 `public_self_eval.py` 的逐车完成率口径 → `module_2` 分位数/KM 诊断 → `module_3` 条件密度注入 → `module_4/module_5` 在线 MPC 负荷塑形与离线完美信息对照。
+
+## 15. 2.2 轮派发方案（按 2.1 结果分叉）
+
+### P0（优先保证完成率门槛与 office1）
+
+- P0-A 完成率代理验证闸门（`module_3_world_model.py` / `public_self_eval.py`）：任何模块改动后强制跑，逐站统计“剩余未交付 ≤3% 目标电量”车辆占比，核对 Caltech≥0.85 / JPL≥0.65 / Office≥0.85。
+- P0-B office1 预测强化（`module_2_prediction.py` + `module_1_data.py`）：若 2.1 后 office1 demand MAE 仍 ≥6.24，加站点相似度加权迁移 + q50 分位回归 + 小时/星期更细分箱；module_1 补 day-of-year、时段等特征。
+- P0-C LLF 完成率守护（`module_5_decision.py`）：若 2.1 后任一站完成率下降，收紧 safety_margin、满充优先、价格延后全部关闭。
+
+### P1（完成率守住后按序推进）
+
+- P1-D demand/dwell 分位数 q75/q90（`module_2_prediction.py`）→ 给 LLF/EDF 提供保守 deadline（`module_5_decision.py`）。
+- P1-E KM 停留时长离线诊断（`module_2_prediction.py`）→ 标定 dwell 分位，不接在线。
+- P1-F 未来到达条件密度/GMM 注入（`module_3_world_model.py`）。
+- P1-G TOU 两阶段削峰（`module_5_decision.py`）：完成基线满足后按电价延后。
+- P1-H 容量前瞻 MPC（`module_5_decision.py`）：用 `forecast_capacity` 对低容量场景提前充。
+- P1-I 干预双基线调优（`module_4_intervention.py`）：保证 effect skill>0，capacity_edf 与 natural 同采样同策略。
+
+### P2（富余时间）
+
+- GMM 联合建模 arrival/duration/energy；离线完美信息基准写进 explain 对照。
+
+## 16. P2 论文库与合规映射（2.3 轮）
+
+| 论文 | 类型 | 合规性 | 对应模块/文件 | 2.3 落地动作 |
+| --- | --- | --- | --- | --- |
+| ACN-Data 2019（Lee, Li & Low） | GMM 联合建模源头 | 合规，sklearn `GaussianMixture` 预装 | `module_2_prediction.py`、`module_3_world_model.py` | 未来到达的 demand/dwell 从条件 GMM 抽样 |
+| Genov 2024（Tree vs cluster） | LightGBM + GMM + Similar Sessions | 合规 | `module_1_data.py`、`module_2_prediction.py`、`module_3_world_model.py` | LightGBM 保持主线；Similar Sessions（余弦近邻）作 office1 小样本基线；GMM 仅在数据足时使用 |
+
+关键提醒：Genov 2024 指出 GMM 表现受数据量约束，office1 仅 919 行，**优先用 Similar Sessions / 经验分位，不硬上 GMM**。
+
+2.3 落地顺序：先做 Similar Sessions 近邻作为 office1 对照 → `module_3` 未来到达条件抽样（经验分位起步，数据足再上 GMM）→ 与 2.1 的 pooled LightGBM 对比后决定保留哪个。
