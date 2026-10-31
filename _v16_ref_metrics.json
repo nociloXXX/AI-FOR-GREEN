@@ -1,0 +1,12 @@
+{
+  "kind": "public-learning-metrics",
+  "split": "time/day 80:20; fit only earlier days",
+  "train_rows": 40705,
+  "validation_rows": 8063,
+  "finite_nonnegative_predictions": true,
+  "mae": {
+    "demand_kwh": 4.405303762320726,
+    "dwell_hours": 1.677432423808963
+  },
+  "note": "Prediction holdout only. Not an official score or a full five-interface evaluation."
+}
