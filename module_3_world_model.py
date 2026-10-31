@@ -160,6 +160,8 @@ def rollout(
     arrival_quantiles=(0.25, 0.5, 0.75),
     demand_quantiles=(0.5, 0.75, 0.9),
     predict_quantiles_fn=None,
+    sample_fn=None,
+    seed=0,
 ):
     """通用前向推演。
 
@@ -172,6 +174,26 @@ def rollout(
     ``arrival_quantiles`` 给多个分位时，把各情景轨迹求平均作为稳健单路径；
     传空元组则退回旧的“期望到达累加器”口径。
     """
+    if sample_fn is not None:
+        # 条件密度/GMM 注入：单条采样路径。natural 与 capacity_edf 由调用方
+        # 传同一个 sample_fn 与 seed，保证注入序列逐车一致。
+        import random as _random
+
+        rng = _random.Random(seed)
+        dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
+        horizon = max(0, int(_finite(horizon_steps, default=0.0)))
+        counts = _arrival_counts(observation, horizon, arrival_rate_fn, (0.5,))[0.5]
+        injected_predict = lambda features: sample_fn(features, rng)  # noqa: E731
+        return _rollout_with_counts(
+            observation,
+            horizon,
+            predict_fn,
+            capacity_fn,
+            counts,
+            priority_key,
+            injected_predict=injected_predict,
+        )
+
     if not arrival_quantiles:
         # 旧口径：累积期望到达，满 1 补一辆。保留给需要严格期望路径的调用方。
         dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
@@ -227,6 +249,8 @@ def forecast_natural(
     predict_fn,
     arrival_rate_fn,
     predict_quantiles_fn=None,
+    sample_fn=None,
+    seed=0,
 ):
     """自然充电推演：不施加站点容量限制，按桩功率上限充到完成或离开。"""
     return rollout(
@@ -236,4 +260,6 @@ def forecast_natural(
         arrival_rate_fn,
         lambda _step: float("inf"),
         predict_quantiles_fn=predict_quantiles_fn,
+        sample_fn=sample_fn,
+        seed=seed,
     )

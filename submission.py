@@ -29,6 +29,10 @@ class FiveModuleModel:
     def predict_quantiles(self, features, levels=(0.5, 0.75, 0.9)):
         return self.prediction.predict_quantiles(features, levels)
 
+    @property
+    def future_sampler(self):
+        return self.prediction.future_sampler
+
     def arrival_rate(self, site, hour, weekday):
         return self.prediction.arrival_rate(site, hour, weekday)
 
@@ -43,6 +47,8 @@ class FiveModuleModel:
                 self.predict,
                 self.arrival_rate,
                 predict_quantiles_fn=self.predict_quantiles,
+                sample_fn=self.future_sampler,
+                seed=0,
             )
         return forecast_natural(
             observation,
@@ -50,6 +56,8 @@ class FiveModuleModel:
             self.predict,
             self.arrival_rate,
             predict_quantiles_fn=self.predict_quantiles,
+            sample_fn=self.future_sampler,
+            seed=0,
         )
 
     def explain(self):

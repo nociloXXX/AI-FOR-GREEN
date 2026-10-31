@@ -92,8 +92,13 @@ DEMAND_SAFETY_FACTOR = 1.5
 PRICE_DEFERRAL_ENABLED = True
 
 
-def act_edf(observation, predict_fn, price_deferral=None):
-    """返回 {token: 请求功率 kW}，只操作当前连接且未完成的车辆。"""
+def act_edf(observation, predict_fn, price_deferral=None, dwell_fn=None):
+    """返回 {token: 请求功率 kW}，只操作当前连接且未完成的车辆。
+
+    ``dwell_fn`` 是预留的保守停留接入点：module_2 落地 q 分位后，submission
+    传入 ``dwell_fn(ArrivalFeatures)->float``（返回保守的停留小时数）即可替换
+    点估计；未传入时使用 ``predict_fn`` 返回的 ``dwell_hours``。
+    """
     dt = _finite(observation.dt_hours, 0.25)
     if dt <= 0:
         dt = 0.25
@@ -117,6 +122,8 @@ def act_edf(observation, predict_fn, price_deferral=None):
             0.0,
         )
         dwell_hours = _finite(pred.dwell_hours, dt)
+        if dwell_fn is not None:
+            dwell_hours = _finite(dwell_fn(vehicle.features), dwell_hours)
         steps_left = max(
             1,
             math.ceil(

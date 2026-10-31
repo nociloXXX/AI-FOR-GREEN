@@ -458,4 +458,6 @@
 | 5 | KM 停留时长离线诊断 | Time Matters 2026 | `module_2` 离线 | numpy 手写 KM，只标定 dwell 分位，不接在线 |
 | 6 | 干预双基线调优 | Lee 2021 ACN、Energy Informatics 2023 | `module_4` | 已自检 effect skill>0，保持 natural/capacity_edf 同采样即可 |
 
+> **module_5 → module_2 对接提醒（q 分位方向）**：LLF 的“保守 deadline”对应更短停留，即下分位（q10/q25 这类），不是 q90。q90 是停留上分位（更长），会让 `steps_left`/slack 变大、车辆更容易被误判成“有松弛”而价格延后，反而可能把 office1 完成率打回 0.85 以下。`module_5_decision.act_edf` 已预留 `dwell_fn` 钩子，并用 `DWELL_SAFETY_FACTOR=0.8` 做过渡；module_2 落地分位后按“短停留=保守”的口径提供，接好后必须重跑 `completion_proxy.py --predict both --days 4`，确认 defer 开/关不回退再启用。
+
 护栏：每完成 1 项就跑 completion_proxy 与 offline_intervention_eval，任一闸门回退即停止后续派发。

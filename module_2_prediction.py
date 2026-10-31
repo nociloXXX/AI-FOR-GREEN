@@ -229,6 +229,8 @@ class PredictionModule:
         self.arrival_rates = _build_arrival_rates(training)
         self.demand_quantiles = {}
         self.dwell_quantiles = {}
+        self.emp_demand_q = {}
+        self.emp_dwell_q = {}
         for site in _SITES:
             frame = training[site]
             xb = _features_base(
@@ -242,6 +244,15 @@ class PredictionModule:
                 q: _fit_hist_quantile(xb, frame.dwell_hours.to_numpy(), q, log_target=True)
                 for q in _QUANTILE_LEVELS
             }
+            self.emp_demand_q[site] = {
+                q: float(np.quantile(frame.demand_kwh.to_numpy(), q))
+                for q in _QUANTILE_LEVELS
+            }
+            self.emp_dwell_q[site] = {
+                q: float(np.quantile(frame.dwell_hours.to_numpy(), q))
+                for q in _QUANTILE_LEVELS
+            }
+        self.future_sampler = _build_future_sampler(training)
         self._cache = {}
 
     @staticmethod
@@ -318,3 +329,82 @@ class PredictionModule:
         else:
             bin_idx = int(hour) % 24
         return float(table[weekday, bin_idx])
+
+
+class FutureSampler:
+    """未来到达 demand/dwell 的条件密度采样器。
+
+    小样本走经验分位插值；数据足时换对角协方差 GMM。调用方传入同一个 RNG
+    与 seed，保证 natural 与 capacity_edf 的注入序列完全一致。
+    """
+
+    def __init__(self, emp_demand_q, emp_dwell_q, gmms=None):
+        self.emp_demand_q = emp_demand_q
+        self.emp_dwell_q = emp_dwell_q
+        self.gmms = gmms or {}
+
+    def __call__(self, features, rng):
+        site = features.site
+        gmm = self.gmms.get(site)
+        if gmm is not None:
+            try:
+                state = np.random.RandomState(rng.getrandbits(32))
+                sample, _ = gmm.sample(random_state=state)
+                demand = float(np.expm1(sample[0, 0]))
+                dwell = float(np.expm1(sample[0, 1]))
+                return Prediction(
+                    float(np.clip(demand, 0.01, 150.0)),
+                    float(np.clip(dwell, 0.25, 24.0)),
+                )
+            except Exception:
+                pass
+
+        demand_q = self.emp_demand_q[site]
+        dwell_q = self.emp_dwell_q[site]
+        u = rng.random()
+        if u < 0.5:
+            x = u * 2.0
+            d = demand_q[0.5] + (demand_q[0.75] - demand_q[0.5]) * x
+            w = dwell_q[0.5] + (dwell_q[0.75] - dwell_q[0.5]) * x
+        else:
+            x = (u - 0.5) * 2.0
+            d = demand_q[0.75] + (demand_q[0.9] - demand_q[0.75]) * x
+            w = dwell_q[0.75] + (dwell_q[0.9] - dwell_q[0.75]) * x
+        return Prediction(
+            float(np.clip(d, 0.01, 150.0)),
+            float(np.clip(w, 0.25, 24.0)),
+        )
+
+
+def _build_future_sampler(training):
+    """按站点构建经验分位 sampler；数据足且 sklearn 可用时换对角 GMM。"""
+    emp_demand_q = {}
+    emp_dwell_q = {}
+    gmms = {}
+    for site in _SITES:
+        frame = training[site]
+        values = frame[["demand_kwh", "dwell_hours"]].to_numpy(dtype=float)
+        values = values[np.isfinite(values).all(axis=1)]
+        if values.size == 0:
+            continue
+        emp_demand_q[site] = {
+            q: float(np.quantile(values[:, 0], q)) for q in _QUANTILE_LEVELS
+        }
+        emp_dwell_q[site] = {
+            q: float(np.quantile(values[:, 1], q)) for q in _QUANTILE_LEVELS
+        }
+        if len(values) >= 300:
+            try:
+                from sklearn.mixture import GaussianMixture
+
+                gmm = GaussianMixture(
+                    n_components=min(6, len(values) // 120),
+                    covariance_type="diag",
+                    reg_covar=1e-3,
+                    random_state=20261008,
+                )
+                gmm.fit(np.log1p(values))
+                gmms[site] = gmm
+            except Exception:
+                gmms[site] = None
+    return FutureSampler(emp_demand_q, emp_dwell_q, gmms)

@@ -63,6 +63,8 @@ def forecast_capacity_edf(
     arrival_rate_fn,
     strategy="edf",
     predict_quantiles_fn=None,
+    sample_fn=None,
+    seed=0,
 ):
     """capacity_edf 反事实推演：同一状态，仅容量条件改为容量内限流。
 
@@ -81,4 +83,6 @@ def forecast_capacity_edf(
         lambda step: capacities[step],
         priority_key=_priority_key(strategy, observation.dt_hours),
         predict_quantiles_fn=predict_quantiles_fn,
+        sample_fn=sample_fn,
+        seed=seed,
     )
