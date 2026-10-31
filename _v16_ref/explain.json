@@ -1,0 +1,19 @@
+{
+  "method": "Site-specific HistGradientBoosting absolute-error ensembles predict demand and dwell time from local hour, weekday, charger limit and the optional last-request snapshot, using separate targets, two-seed averaging, recent-day weighting, request-value transforms and a charger-time demand cap. Arrival rates use weekday-by-96-slot empirical frequencies. The deterministic 15-minute world model retains five joint ExtraTrees demand/dwell quantile cohorts for future arrivals and represents each current vehicle with three joint ExtraTrees demand/dwell cohorts at probabilities 0.2, 0.6 and 0.2. Each current cohort keeps the demand and dwell predicted by the same tree, is centered on the survival-adjusted remaining dwell, and preserves expected vehicle count and remaining energy. Historical quarter-hour arrival counts are aligned from the current local step for any supplied window length and normalized by same-weekday training coverage. Future-arrival intensity is additionally conditioned on the current parked-vehicle count using site-and-origin regressions fitted only from complete training days. Vehicles whose predicted dwell has elapsed use a training-only conditional survival residual. The model simulates every fractional current and future cohort under both natural and capacity_edf interventions from the same state; capacity_edf uses complete earliest-predicted-departure ordering without an arbitrary service-vehicle budget. Completion-aware dispatch applies a 1.25 demand-planning margin, caps the optional request snapshot at 1.35 times predicted demand, protects vehicles with no deadline slack, and concentrates scarce capacity on the smallest jobs. Office1 uses slack-first scheduling and shares residual power with tail-uncertainty vehicles whose predicted demand is satisfied but whose observed completion is still pending.",
+  "assumptions": [
+    "Only current-step observations are used for online actions.",
+    "Recent historical sessions are more representative of future behavior.",
+    "last_requested_energy_kwh is an optional snapshot and is never treated as a known final target.",
+    "Request uncertainty is bounded by the documented 1.35 demand-shift factor.",
+    "Demand, dwell and arrival assumptions stay unchanged when only counterfactual capacity changes.",
+    "Every charging interval is 0.25 hours and future charger capacity is 6.6 kW.",
+    "Historical arrivals are aggregate same-weekday counts aligned to the current quarter-hour step.",
+    "Current parked-vehicle count is available online and is predictive of future arrival intensity."
+  ],
+  "limitations": [
+    "Vehicle demand and departure time remain uncertain at arrival.",
+    "Office1 has sparse history, so its site-specific estimate is less stable.",
+    "capacity_edf represents a simulated physical response rather than real user behavior.",
+    "The model cannot read hidden truth or future arrivals and may fail under distribution shift."
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "route": "ml",
+  "contract_version": "last-request-snapshot-1",
+  "environment_id": "cpu-ml-methods-v3",
+  "seed": 20261008,
+  "files": {
+    "README.md": "2d080bb92a81c2be25ab2fc13a00ff637bc317bab2ffcf1de996c8b3bf808518",
+    "explain.json": "3c0454d61c3fbe1b717e557cd96c071eecac2cf0ca5059842462d316a3bc678b",
+    "submission.py": "dcf8cafd2789f396bd5fe9fdaf707c2ec20068ab05e6e1340ccb564197f35fa1"
+  }
+}
