@@ -46,12 +46,13 @@ class FiveModuleModel:
             "method": (
                 "five-module online model: data features -> ExtraTrees demand/dwell "
                 "+ weekday-hour arrivals -> physics world model -> counterfactual "
-                "capacity rollout -> EDF charging decision"
+                "capacity rollout -> least-slack + TOU price-aware charging decision"
             ),
             "assumptions": [
                 "charger limit is known at arrival",
                 "demand and dwell are unchanged by the capacity intervention",
                 "future arrivals are modeled from public history, not known in advance",
+                "price-aware deferral only applies when a vehicle still has spare dwell slack, so completion outranks cost",
             ],
             "limitations": [
                 "arrival features cannot capture all driver intent",
