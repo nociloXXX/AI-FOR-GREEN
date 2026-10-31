@@ -103,7 +103,11 @@ def _build_arrival_rates(training):
     rates = {}
     for site in _SITES:
         frame = training[site]
-        days = pd.date_range(frame.day.min(), frame.day.max(), freq="D")
+        day = pd.to_datetime(frame.day, errors="coerce").dropna()
+        if day.empty:
+            rates[site] = (np.zeros((7, 24), dtype=float), 24)
+            continue
+        days = pd.date_range(day.min(), day.max(), freq="D")
         weekday_days = np.bincount(days.dayofweek, minlength=7).astype(float)
         total_days = max(float(len(days)), 1.0)
 
@@ -144,11 +148,12 @@ class PredictionModule:
 
         for site in _SITES:
             frame = training[site]
-            requested = (
-                np.asarray(frame["last_requested_energy_kwh"], dtype=float)
-                if "last_requested_energy_kwh" in frame.columns
-                else np.full(len(frame), np.nan)
-            )
+            if "last_requested_energy_kwh" in frame.columns:
+                requested = pd.to_numeric(
+                    frame["last_requested_energy_kwh"], errors="coerce"
+                ).to_numpy(dtype=float)
+            else:
+                requested = np.full(len(frame), np.nan)
             valid = np.isfinite(requested) & (requested > 0.0)
             xb = _features_base(
                 frame.hour, frame.weekday, frame.charger_limit_kw
@@ -201,10 +206,9 @@ class PredictionModule:
             return _load_booster(path)
         except Exception:
             pass
-        try:
-            return _fit_booster(x, y, num_leaves)
-        except Exception:
-            return _fit_extra_trees(x, y)
+        # 评测沙箱内不重新训练 LightGBM；权重缺失或加载失败时走轻量 ExtraTrees，
+        # 避免运行时训练导致超时或内存超限。
+        return _fit_extra_trees(x, y)
 
     @staticmethod
     def _model_predict(model, x):
@@ -223,6 +227,8 @@ class PredictionModule:
             None if not use_request else round(float(requested), 3),
         )
         if key not in self._cache:
+            if len(self._cache) > 20000:
+                self._cache.clear()
             if use_request:
                 x = _features_with_request(
                     [features.hour], [features.weekday],
