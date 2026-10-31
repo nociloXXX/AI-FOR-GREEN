@@ -167,6 +167,7 @@ class PredictionModule:
         self.dwell_with = {}
         self.demand_fallback = {}
         self.dwell_fallback = {}
+        self.with_available = {}
 
         for site in _SITES:
             frame = training[site]
@@ -195,6 +196,7 @@ class PredictionModule:
                 }
                 self.demand_with[site] = self.demand_fallback[site]
                 self.dwell_with[site] = self.dwell_fallback[site]
+                self.with_available[site] = False
                 continue
 
             if valid.any() and (~valid).sum() >= 20:
@@ -234,6 +236,7 @@ class PredictionModule:
             else:
                 self.demand_with[site] = self.demand_fallback[site]
                 self.dwell_with[site] = self.dwell_fallback[site]
+            self.with_available[site] = bool(valid.any())
 
         self.arrival_rates = _build_arrival_rates(training)
         self.demand_quantiles = {}
@@ -308,7 +311,7 @@ class PredictionModule:
             None if not use_request else round(float(requested), 3),
         )
         if key not in self._cache:
-            if use_request:
+            if use_request and self.with_available.get(features.site, False):
                 x = _features_with_request(
                     [features.hour], [features.weekday],
                     [features.charger_limit_kw], [float(requested)],
