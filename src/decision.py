@@ -216,6 +216,37 @@ def peak_shaving(
     return dispatch, unmet
 
 
+def choose_dispatch(
+    predicted_power_kw,
+    capacity_kw,
+    step_hours=None,
+    price=None,
+    state=None,
+):
+    """充电决策入口：生成候选干预，用干预推演评分并选择最优调度。
+
+    默认候选只含因果削峰与预测前瞻 MPC，保证在线安全；只有显式配置
+    ``lp_load_shift`` 时才加入全量离线平移。返回 ``(dispatch, unmet, info)``，
+    ``info`` 里带所选策略与各候选的推演评分表，便于路演解释。
+    """
+    from .intervention import evaluate_candidates
+
+    pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
+    names = list(getattr(C, "INTERVENTION_CANDIDATES", ["causal", "mpc"]))
+
+    candidates = []
+    for name in names:
+        dispatch, _ = peak_shaving(pred, capacity_kw, strategy=name, price=price)
+        candidates.append((name, dispatch))
+
+    dispatch, info = evaluate_candidates(
+        pred, candidates, capacity_kw, step_hours, state=state
+    )
+    unmet = np.maximum(pred - dispatch, 0.0)
+    info["selected_strategy"] = info.get("name")
+    return dispatch, unmet, info
+
+
 PRIORITY_KEYS = {
     "fcfs": lambda s: (s["start_step"], s["idx"]),
     "low_soc_first": lambda s: (s["start_soc"], s["start_step"], s["idx"]),

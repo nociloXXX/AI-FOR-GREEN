@@ -20,6 +20,12 @@ TRAIN_RATIO = 0.8
 DECISION_STRATEGY = "causal"
 MPC_HORIZON_STEPS = HORIZON_STEPS
 
+# 干预推演：候选策略列表与评分惩罚。默认只含因果与预测前瞻，在线安全；
+# 离线分析可临时加入 "lp_load_shift" 做全量能量守恒平移。
+INTERVENTION_CANDIDATES = ["causal", "mpc"]
+INTERVENTION_CURTAIL_PENALTY = 2.0
+INTERVENTION_VIOLATION_PENALTY = 1000.0
+
 # 储能调度参数。
 BATTERY_EFFICIENCY = 0.95
 BATTERY_SOC_MIN = 0.1
