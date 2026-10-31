@@ -56,6 +56,19 @@ def _is_valid_request(value):
     return np.isfinite(value) and value > 0.0
 
 
+def _weighted_median(values, weights):
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    cdf = np.cumsum(weights)
+    total = cdf[-1]
+    if total <= 1e-12:
+        return float(values[len(values) // 2])
+    return float(values[np.searchsorted(cdf, 0.5 * total)])
+
+
 def _fit_booster(x, y, num_leaves):
     import lightgbm as lgb
 
@@ -160,7 +173,7 @@ def _build_arrival_rates(training):
 class PredictionModule:
     """车辆级需求/停留预测。"""
 
-    KNN_WEIGHT = 0.3
+    KNN_WEIGHT = 0.5
 
     def __init__(self, training):
         self.demand_with = {}
@@ -295,9 +308,8 @@ class PredictionModule:
         weights = np.maximum(sim[idx], 0.0)
         if weights.sum() <= 1e-12:
             weights = np.ones(k)
-        weights /= weights.sum()
-        demand = float((weights * self._office_knn["demand"][idx]).sum())
-        dwell = float((weights * self._office_knn["dwell"][idx]).sum())
+        demand = _weighted_median(self._office_knn["demand"][idx], weights)
+        dwell = _weighted_median(self._office_knn["dwell"][idx], weights)
         return demand, dwell
 
     def predict(self, features):
