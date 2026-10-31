@@ -20,7 +20,7 @@ from module_5_decision import act_edf
 
 class FiveModuleModel:
     def __init__(self, training):
-        self.labels, self.rates = summarize_site(training)
+        self.labels = summarize_site(training)
         self.prediction = PredictionModule(training)
 
     def predict(self, features):

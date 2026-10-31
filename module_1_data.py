@@ -114,9 +114,8 @@ def _day_and_weekday_counts(frame):
 
 
 def summarize_site(training):
-    """返回每个站点的需求/停留中位数标签与分小时到达率。"""
+    """返回每个站点的需求/停留中位数标签。"""
     labels = {}
-    rates = {}
     for site, frame in training.items():
         if frame is None or len(frame) == 0:
             continue
@@ -124,11 +123,7 @@ def summarize_site(training):
             float(frame.demand_kwh.median()),
             float(frame.dwell_hours.median()),
         )
-        total_days, _ = _day_and_weekday_counts(frame)
-        hours = np.asarray(frame.hour, dtype=float) % 24.0
-        counts = np.histogram(hours, bins=24, range=(0.0, 24.0))[0].astype(float)
-        rates[site] = _smooth_hours(counts) / max(total_days, 1.0) / 4.0
-    return labels, rates
+    return labels
 
 
 def build_weekday_hour_rates(training):

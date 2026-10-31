@@ -10,6 +10,17 @@
 import argparse, ast, json, hashlib, zipfile
 from pathlib import Path, PurePosixPath
 
+# ML 提交运行时代码：submission.py 会 import 这些模块，必须一并打包，
+# 否则沙箱直接 ImportError。权重等额外文件仍通过 --include 补充。
+ML_SOURCE_FILES = [
+    'module_1_data.py',
+    'module_2_prediction.py',
+    'module_3_world_model.py',
+    'module_4_intervention.py',
+    'module_5_decision.py',
+    'acn_causal/student_api.py',
+]
+
 
 # -----------------------------------------------------------------
 # 1. 命令行参数
@@ -29,12 +40,17 @@ def parse_args():
 # 2. 收集文件并做安全/类型校验,返回 {包内路径: 字节}
 # -----------------------------------------------------------------
 def collect_files(p, a, root):
-    names = ['README.md', 'explain.json', 'submission.py'] + a.include
+    names = ['README.md', 'explain.json', 'submission.py']
+    if a.route == 'ml':
+        names += ML_SOURCE_FILES
+    names += a.include
     if len(set(names)) != len(names):
         p.error('duplicate files')
     files = {}
     allowed = {'.py', '.json', '.txt', '.md', '.npz', '.npy', '.pkl', '.joblib'}  # ML路线允许的扩展名
     for name in names:
+        if PurePosixPath(name).parts[:1] == ('data',):
+            p.error('training/timeseries data must not be packaged')
         rel = PurePosixPath(name)
         f = root / name
         # 拒绝:绝对路径、含 '..'、反斜杠、符号链接、非文件、解析后逃逸出待打包目录

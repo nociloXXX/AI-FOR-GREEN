@@ -4,3 +4,8 @@ __pycache__/
 # Machine-specific local state (keep out of the public repo)
 .autosync/
 BACKUP_INFO.md
+
+# 官方训练/时间序列数据：不进提交 ZIP，也不应纳入版本库
+data/training_*.json
+data/training_public.json
+data/timeseries_*.jsonl.gz

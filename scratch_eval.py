@@ -215,6 +215,95 @@ def run_lgb_objective(train, held, obj="regression_l1"):
     return eval_mae(np.asarray(preds), held)
 
 
+def run_lgb_tuned(train, held):
+    import lightgbm as lgb
+
+    demand_models, dwell_models = {}, {}
+    for site, frame in train.items():
+        x = rich_features(
+            frame.hour, frame.weekday, frame.charger_limit_kw,
+            frame.last_requested_energy_kwh,
+        )
+        dm = lgb.LGBMRegressor(
+            objective="regression_l1", n_estimators=800, learning_rate=0.04,
+            num_leaves=31, min_child_samples=20, subsample=0.8,
+            colsample_bytree=0.8, reg_lambda=1.0, random_state=7,
+            verbose=-1, n_jobs=1,
+        )
+        dm.fit(x, frame.demand_kwh)
+        wm = lgb.LGBMRegressor(
+            objective="regression_l1", n_estimators=600, learning_rate=0.04,
+            num_leaves=15, min_child_samples=20, subsample=0.8,
+            colsample_bytree=0.8, reg_lambda=1.0, random_state=7,
+            verbose=-1, n_jobs=1,
+        )
+        wm.fit(x, frame.dwell_hours)
+        demand_models[site] = dm
+        dwell_models[site] = wm
+    preds = []
+    for site, r in held:
+        x = rich_features(
+            [r["hour"]], [r["weekday"]], [r["charger_limit_kw"]],
+            [r["last_requested_energy_kwh"]],
+        )
+        preds.append([demand_models[site].predict(x)[0], dwell_models[site].predict(x)[0]])
+    return eval_mae(np.asarray(preds), held)
+
+
+def run_lgb_early(train, held):
+    import lightgbm as lgb
+
+    demand_models, dwell_models = {}, {}
+    site_errors = {}
+    for site, frame in train.items():
+        x = rich_features(
+            frame.hour, frame.weekday, frame.charger_limit_kw,
+            frame.last_requested_energy_kwh,
+        )
+        days = sorted(frame.day.unique())
+        cut = days[max(1, int(len(days) * 0.9)) - 1]
+        fit_mask = (frame.day <= cut).to_numpy()
+        val_mask = ~fit_mask
+
+        def fit_one(y_col, leaves, n_est):
+            m = lgb.LGBMRegressor(
+                objective="regression_l1", n_estimators=n_est, learning_rate=0.04,
+                num_leaves=leaves, min_child_samples=20, subsample=0.8,
+                colsample_bytree=0.8, reg_lambda=1.0, random_state=7,
+                verbose=-1, n_jobs=1,
+            )
+            m.fit(
+                x[fit_mask], frame[y_col].to_numpy()[fit_mask],
+                eval_set=[(x[val_mask], frame[y_col].to_numpy()[val_mask])],
+                eval_metric="mae",
+                callbacks=[lgb.early_stopping(40, verbose=False)],
+            )
+            return m
+
+        dm = fit_one("demand_kwh", 31, 1500)
+        wm = fit_one("dwell_hours", 15, 1200)
+        demand_models[site] = dm
+        dwell_models[site] = wm
+
+        site_held = [(s, r) for s, r in held if s == site]
+        sp = []
+        for s, r in site_held:
+            xx = rich_features(
+                [r["hour"]], [r["weekday"]], [r["charger_limit_kw"]],
+                [r["last_requested_energy_kwh"]],
+            )
+            sp.append([dm.predict(xx)[0], wm.predict(xx)[0]])
+        site_errors[site] = eval_mae(np.asarray(sp), site_held)
+    preds = []
+    for site, r in held:
+        xx = rich_features(
+            [r["hour"]], [r["weekday"]], [r["charger_limit_kw"]],
+            [r["last_requested_energy_kwh"]],
+        )
+        preds.append([demand_models[site].predict(xx)[0], dwell_models[site].predict(xx)[0]])
+    return eval_mae(np.asarray(preds), held), site_errors
+
+
 def eda(training):
     for site, frame in training.items():
         print(site, len(frame), "days", frame.day.nunique())
@@ -242,6 +331,11 @@ def main():
     print("xgb two-stage MAE:", run_two_stage(train, held))
     print("lgb L1 MAE:", run_lgb_objective(train, held, "regression_l1"))
     print("lgb L2 MAE:", run_lgb_objective(train, held, "regression_l2"))
+    print("lgb tuned L1 MAE:", run_lgb_tuned(train, held))
+    total, per_site = run_lgb_early(train, held)
+    print("lgb early L1 MAE:", total)
+    for site, err in per_site.items():
+        print("  ", site, "held", sum(1 for s, _ in held if s == site), "MAE", err)
 
 
 if __name__ == "__main__":

@@ -10,14 +10,33 @@
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
-from acn_causal.student_api import ArrivalFeatures, Observation, Prediction
+from acn_causal.student_api import ArrivalFeatures, Prediction
+
+
+def _finite(value, default=0.0, allow_inf=False):
+    """把数值转成有限 float；NaN/Inf/非法值退回 default（capacity 可放行 +inf）。"""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if math.isnan(value):
+        return float(default)
+    if allow_inf and value == math.inf:
+        return value
+    if not math.isfinite(value):
+        return float(default)
+    return value
 
 
 def _remaining_steps(pred: Prediction, dt_hours: float, elapsed_steps: int) -> int:
     """预测剩余停留步数，至少保留一步，避免零除与车辆提前消失。"""
-    steps = int(np.ceil(pred.dwell_hours / max(dt_hours, 1e-9) - elapsed_steps))
+    dwell = _finite(getattr(pred, "dwell_hours", 0.0), default=dt_hours)
+    elapsed = max(0, int(_finite(elapsed_steps, default=0.0)))
+    steps = int(np.ceil(dwell / max(dt_hours, 1e-9) - elapsed))
     return max(1, steps)
 
 
@@ -29,37 +48,49 @@ def rollout(observation, horizon_steps, predict_fn, arrival_rate_fn, capacity_fn
     全体车辆停留步数减一。``capacity_fn(step)`` 返回本步可用充电功率，传
     ``float("inf")`` 即自然满功率充电。
     """
-    dt = max(float(observation.dt_hours), 1e-9)
+    dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
+    horizon = max(0, int(_finite(horizon_steps, default=0.0)))
     cars = []
     for vehicle in observation.vehicles:
         if vehicle.charging_complete:
             continue
         pred = predict_fn(vehicle.features)
+        demand = max(
+            _finite(getattr(pred, "demand_kwh", 0.0), default=0.0)
+            - _finite(vehicle.delivered_kwh, default=0.0),
+            0.0,
+        )
+        limit = max(
+            _finite(vehicle.features.charger_limit_kw, default=0.0),
+            0.0,
+        )
         cars.append(
             [
-                max(pred.demand_kwh - vehicle.delivered_kwh, 0.0),
+                demand,
                 _remaining_steps(pred, dt, vehicle.elapsed_steps),
-                vehicle.features.charger_limit_kw,
+                limit,
             ]
         )
 
     loads = []
     active = []
     acc = 0.0
-    for step in range(horizon_steps):
+    for step in range(horizon):
         hour = (observation.local_hour + step * dt) % 24.0
         weekday = (
             observation.weekday
             + int((observation.local_hour + step * dt) // 24)
         ) % 7
-        acc += arrival_rate_fn(observation.site, hour, weekday)
+        rate = max(_finite(arrival_rate_fn(observation.site, hour, weekday)), 0.0)
+        acc += rate
         while acc >= 1.0:
             pred = predict_fn(
                 ArrivalFeatures("forecast", observation.site, hour, weekday, 6.6)
             )
+            demand = max(_finite(getattr(pred, "demand_kwh", 0.0)), 0.0)
             cars.append(
                 [
-                    pred.demand_kwh,
+                    demand,
                     _remaining_steps(pred, dt, 0),
                     6.6,
                 ]
@@ -68,7 +99,7 @@ def rollout(observation, horizon_steps, predict_fn, arrival_rate_fn, capacity_fn
 
         valid = [car for car in cars if car[0] > 1e-8 and car[1] > 0]
         active.append(int(len(valid)))
-        cap = capacity_fn(step)
+        cap = _finite(capacity_fn(step), default=0.0, allow_inf=True)
         load = 0.0
         for car in sorted(valid, key=lambda item: item[1]):
             power = min(car[2], car[0] / dt, cap)
@@ -78,10 +109,10 @@ def rollout(observation, horizon_steps, predict_fn, arrival_rate_fn, capacity_fn
         for car in cars:
             car[1] -= 1
         loads.append(float(load))
-    return {
-        "ev_load_kw": [max(0.0, float(v)) for v in loads],
-        "active_count": active,
-    }
+    loads = [max(_finite(v), 0.0) for v in loads]
+    loads += [0.0] * (horizon - len(loads))
+    active += [0] * (horizon - len(active))
+    return {"ev_load_kw": loads, "active_count": active}
 
 
 def forecast_natural(observation, horizon_steps, predict_fn, arrival_rate_fn):
@@ -93,48 +124,3 @@ def forecast_natural(observation, horizon_steps, predict_fn, arrival_rate_fn):
         arrival_rate_fn,
         lambda _step: float("inf"),
     )
-
-
-def forecast_capacity_edf(observation, horizon_steps, predict_fn, arrival_rate_fn):
-    """容量 EDF 推演：公开容量扣除背景负荷后，按预测离开最早优先充电。"""
-    cap_seq = observation.intervention_capacity or observation.forecast_capacity
-    background_seq = observation.forecast_background
-
-    def capacity_fn(step):
-        if not cap_seq:
-            return 0.0
-        if not background_seq:
-            background = 0.0
-        else:
-            background = background_seq[min(step, len(background_seq) - 1)]
-        return max(float(cap_seq[min(step, len(cap_seq) - 1)]) - float(background), 0.0)
-
-    return rollout(
-        observation,
-        horizon_steps,
-        predict_fn,
-        arrival_rate_fn,
-        capacity_fn,
-    )
-
-
-class WorldModel:
-    """供提交入口使用的世界模型门面。
-
-    ``forecast`` 统一返回 ``{"ev_load_kw": [...], "active_count": [...]}``，
-    两个序列长度都等于 ``horizon_steps``；natural 与 capacity_edf 从同一
-    状态出发，只改变容量条件与分配顺序。
-    """
-
-    def __init__(self, predict_fn, arrival_rate_fn):
-        self.predict_fn = predict_fn
-        self.arrival_rate_fn = arrival_rate_fn
-
-    def forecast(self, observation, horizon_steps, intervention):
-        if intervention == "capacity_edf":
-            return forecast_capacity_edf(
-                observation, horizon_steps, self.predict_fn, self.arrival_rate_fn
-            )
-        return forecast_natural(
-            observation, horizon_steps, self.predict_fn, self.arrival_rate_fn
-        )
