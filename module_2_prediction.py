@@ -1,12 +1,12 @@
 """模块2：预测。
 
-用 LightGBM（L1/MAE 目标）学习每辆车的需求电量与停留时长，并用星期x时段
-到达率表估计期望到达数。特征包含小时/星期的周期编码、充电桩功率上限，以及
-``last_requested_energy_kwh``（缺失保留 NaN，不当作 0）。
+用 LightGBM（L1/MAE 目标）按站点分别训练每辆车的需求电量与停留时长。
+``last_requested_energy_kwh`` 采用双分支：申报值正有限时使用含该特征的模型，
+缺失/非法时退化为不含该特征的回退模型。未来到达的 ArrivalFeatures 该字段为
+None，因此 forecast 推演自然走回退分支，不会把它当作 0 或已知意图。
 
 沙箱内优先加载 ``weights/`` 下的 LightGBM 文本权重，不重新训练；权重缺失或
-加载失败时才用公开训练数据现场拟合。整个模块只读取公开历史，不读取未来到达、
-真实离开时间或隐藏需求标签。
+加载失败时退回现场拟合，LightGBM 不可用时再退回 ExtraTrees 基线。
 """
 from __future__ import annotations
 
@@ -22,16 +22,11 @@ _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _SITES = ("caltech", "jpl", "office1")
 
 
-def _make_features(hour, weekday, pmax, requested):
-    """构造需求/停留回归特征；requested 的缺失值保留为 NaN。"""
+def _features_base(hour, weekday, pmax):
+    """不含申报需求的特征，用于回退分支。"""
     hour = np.asarray(hour, dtype=float)
     weekday = np.asarray(weekday, dtype=float)
     pmax = np.asarray(pmax, dtype=float)
-    requested = np.asarray(requested, dtype=float)
-    # 只有正有限申报值才是有效信号；NaN/Inf/非正都按缺失处理，不填 0。
-    valid = np.isfinite(requested) & (requested > 0.0)
-    missing = (~valid).astype(float)
-    requested = np.where(valid, requested, np.nan)
     return np.column_stack(
         [
             np.sin(hour * np.pi / 12.0),
@@ -40,10 +35,24 @@ def _make_features(hour, weekday, pmax, requested):
             np.cos(weekday * 2.0 * np.pi / 7.0),
             weekday,
             pmax,
-            requested,
-            missing,
         ]
     )
+
+
+def _features_with_request(hour, weekday, pmax, requested):
+    """含申报需求的特征，只在 requested 为正有限值时调用。"""
+    requested = np.asarray(requested, dtype=float)
+    return np.column_stack(
+        [_features_base(hour, weekday, pmax), requested.reshape(-1, 1)]
+    )
+
+
+def _is_valid_request(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return False
+    return np.isfinite(value) and value > 0.0
 
 
 def _fit_booster(x, y, num_leaves):
@@ -98,7 +107,6 @@ def _build_arrival_rates(training):
         weekday_days = np.bincount(days.dayofweek, minlength=7).astype(float)
         total_days = max(float(len(days)), 1.0)
 
-        # 数据充足用 15 分钟粒度，数据稀疏退到小时粒度。
         sessions_per_day = len(frame) / total_days
         if sessions_per_day >= 10.0:
             nbins = 96
@@ -115,44 +123,75 @@ def _build_arrival_rates(training):
 
         observed = weekday_days[:, None] * steps_per_bin
         mean_rate = len(frame) / (total_days * 96.0)
-
-        # 在计数空间做先验收缩：每个 weekday-hour 单元加入 pseudo_days 天
-        # 的站点平均到达数，避免小样本单元被噪声主导。
         pseudo_days = 3.0
         pseudo = mean_rate * steps_per_bin * pseudo_days
         rate = (counts + pseudo) / (observed + steps_per_bin * pseudo_days)
 
-        # 沿时段做小窗圆形平滑，保留相邻时段的连续性。
-        smoothed = rate.copy()
         prev = np.roll(rate, 1, axis=1)
         nxt = np.roll(rate, -1, axis=1)
-        smoothed = 0.25 * prev + 0.5 * rate + 0.25 * nxt
-        rates[site] = (smoothed, nbins)
+        rates[site] = (0.25 * prev + 0.5 * rate + 0.25 * nxt, nbins)
     return rates
 
 
 class PredictionModule:
-    """需求/停留 LightGBM 回归器 + 星期x时段到达率表。"""
+    """需求/停留 LightGBM 双分支回归器 + 星期x时段到达率表。"""
 
     def __init__(self, training):
-        self.demand = {}
-        self.dwell = {}
+        self.demand_with = {}
+        self.dwell_with = {}
+        self.demand_fallback = {}
+        self.dwell_fallback = {}
+
         for site in _SITES:
             frame = training[site]
             requested = (
-                frame["last_requested_energy_kwh"]
+                np.asarray(frame["last_requested_energy_kwh"], dtype=float)
                 if "last_requested_energy_kwh" in frame.columns
                 else np.full(len(frame), np.nan)
             )
-            x = _make_features(
-                frame.hour, frame.weekday, frame.charger_limit_kw, requested
+            valid = np.isfinite(requested) & (requested > 0.0)
+            xb = _features_base(
+                frame.hour, frame.weekday, frame.charger_limit_kw
             )
-            self.demand[site] = self._model_or_fit(
-                _WEIGHTS_DIR / f"demand_{site}.txt", x, frame.demand_kwh, 31
+
+            if valid.any() and (~valid).sum() >= 20:
+                fallback_mask = ~valid
+            else:
+                fallback_mask = np.ones(len(frame), dtype=bool)
+            self.demand_fallback[site] = self._model_or_fit(
+                _WEIGHTS_DIR / f"demand_fallback_{site}.txt",
+                xb[fallback_mask],
+                frame.demand_kwh.to_numpy()[fallback_mask],
+                31,
             )
-            self.dwell[site] = self._model_or_fit(
-                _WEIGHTS_DIR / f"dwell_{site}.txt", x, frame.dwell_hours, 15
+            self.dwell_fallback[site] = self._model_or_fit(
+                _WEIGHTS_DIR / f"dwell_fallback_{site}.txt",
+                xb[fallback_mask],
+                frame.dwell_hours.to_numpy()[fallback_mask],
+                15,
             )
+
+            if valid.any():
+                xw = _features_with_request(
+                    frame.hour[valid], frame.weekday[valid],
+                    frame.charger_limit_kw[valid], requested[valid],
+                )
+                self.demand_with[site] = self._model_or_fit(
+                    _WEIGHTS_DIR / f"demand_with_{site}.txt",
+                    xw,
+                    frame.demand_kwh.to_numpy()[valid],
+                    31,
+                )
+                self.dwell_with[site] = self._model_or_fit(
+                    _WEIGHTS_DIR / f"dwell_with_{site}.txt",
+                    xw,
+                    frame.dwell_hours.to_numpy()[valid],
+                    15,
+                )
+            else:
+                self.demand_with[site] = self.demand_fallback[site]
+                self.dwell_with[site] = self.dwell_fallback[site]
+
         self.arrival_rates = _build_arrival_rates(training)
         self._cache = {}
 
@@ -169,31 +208,34 @@ class PredictionModule:
 
     @staticmethod
     def _model_predict(model, x):
-        # LightGBM Booster 原生处理 NaN；ExtraTrees 用 -1 占位并用 is_missing 区分。
         if hasattr(model, "num_feature"):
             return model.predict(x)
         return model.predict(np.nan_to_num(x, nan=-1.0))
 
     def predict(self, features):
         requested = getattr(features, "last_requested_energy_kwh", None)
-        if requested is not None and not np.isfinite(float(requested)):
-            requested = None
+        use_request = _is_valid_request(requested)
         key = (
             features.site,
             round(float(features.hour), 4),
             int(features.weekday),
             round(float(features.charger_limit_kw), 3),
-            None if requested is None else round(float(requested), 3),
+            None if not use_request else round(float(requested), 3),
         )
         if key not in self._cache:
-            x = _make_features(
-                [features.hour],
-                [features.weekday],
-                [features.charger_limit_kw],
-                [np.nan if requested is None else float(requested)],
-            )
-            demand = float(self._model_predict(self.demand[features.site], x)[0])
-            dwell = float(self._model_predict(self.dwell[features.site], x)[0])
+            if use_request:
+                x = _features_with_request(
+                    [features.hour], [features.weekday],
+                    [features.charger_limit_kw], [float(requested)],
+                )
+                demand = float(self._model_predict(self.demand_with[features.site], x)[0])
+                dwell = float(self._model_predict(self.dwell_with[features.site], x)[0])
+            else:
+                x = _features_base(
+                    [features.hour], [features.weekday], [features.charger_limit_kw]
+                )
+                demand = float(self._model_predict(self.demand_fallback[features.site], x)[0])
+                dwell = float(self._model_predict(self.dwell_fallback[features.site], x)[0])
             self._cache[key] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),

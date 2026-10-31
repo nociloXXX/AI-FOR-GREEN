@@ -1,8 +1,11 @@
-"""离线训练 module_2_prediction 的 LightGBM 权重。
+"""离线训练 module_2_prediction 的 LightGBM 双分支权重。
 
-使用公开三站训练标签，在评测沙箱外拟合 demand/dwell 两个 L1(MAE) 回归器，
-并把 booster 存成 LightGBM 文本格式。沙箱内的 module_2_prediction.py 只加载
-这些权重，不重新训练；加载失败时才退回现场拟合。
+每个站点训练两组单目标模型：
+
+- fallback：只含 hour/weekday/charger_limit 特征，在申报需求缺失的样本上训练；
+- with：含 last_requested_energy_kwh，只在正有限申报值的样本上训练。
+
+权重存为 LightGBM 文本格式。沙箱内 module_2_prediction.py 只加载，不重新训练。
 """
 import json
 from pathlib import Path
@@ -18,12 +21,10 @@ WEIGHTS_DIR = ROOT / "weights"
 SITES = ("caltech", "jpl", "office1")
 
 
-def make_features(hour, weekday, pmax, requested):
+def features_base(hour, weekday, pmax):
     hour = np.asarray(hour, dtype=float)
     weekday = np.asarray(weekday, dtype=float)
     pmax = np.asarray(pmax, dtype=float)
-    requested = np.asarray(requested, dtype=float)
-    missing = np.isnan(requested).astype(float)
     return np.column_stack(
         [
             np.sin(hour * np.pi / 12.0),
@@ -32,8 +33,6 @@ def make_features(hour, weekday, pmax, requested):
             np.cos(weekday * 2.0 * np.pi / 7.0),
             weekday,
             pmax,
-            requested,
-            missing,
         ]
     )
 
@@ -73,18 +72,34 @@ def main():
     for site in SITES:
         frame = training[site]
         requested = (
-            frame["last_requested_energy_kwh"]
+            np.asarray(frame["last_requested_energy_kwh"], dtype=float)
             if "last_requested_energy_kwh" in frame.columns
             else np.full(len(frame), np.nan)
         )
-        x = make_features(
-            frame.hour, frame.weekday, frame.charger_limit_kw, requested
-        )
-        demand = fit_booster(x, frame.demand_kwh, num_leaves=31)
-        dwell = fit_booster(x, frame.dwell_hours, num_leaves=15)
-        demand.save_model(WEIGHTS_DIR / f"demand_{site}.txt")
-        dwell.save_model(WEIGHTS_DIR / f"dwell_{site}.txt")
-        print(site, "rows", len(frame), "saved")
+        valid = np.isfinite(requested) & (requested > 0.0)
+        xb = features_base(frame.hour, frame.weekday, frame.charger_limit_kw)
+
+        if valid.any() and (~valid).sum() >= 20:
+            fallback_mask = ~valid
+        else:
+            fallback_mask = np.ones(len(frame), dtype=bool)
+
+        fit_booster(
+            xb[fallback_mask], frame.demand_kwh.to_numpy()[fallback_mask], 31
+        ).save_model(WEIGHTS_DIR / f"demand_fallback_{site}.txt")
+        fit_booster(
+            xb[fallback_mask], frame.dwell_hours.to_numpy()[fallback_mask], 15
+        ).save_model(WEIGHTS_DIR / f"dwell_fallback_{site}.txt")
+
+        if valid.any():
+            xw = np.column_stack([xb[valid], requested[valid]])
+            fit_booster(
+                xw, frame.demand_kwh.to_numpy()[valid], 31
+            ).save_model(WEIGHTS_DIR / f"demand_with_{site}.txt")
+            fit_booster(
+                xw, frame.dwell_hours.to_numpy()[valid], 15
+            ).save_model(WEIGHTS_DIR / f"dwell_with_{site}.txt")
+        print(site, "rows", len(frame), "valid", int(valid.sum()), "saved")
     print("weights dir:", WEIGHTS_DIR)
     print("fit seconds:", round(time.time() - started, 2))
 
