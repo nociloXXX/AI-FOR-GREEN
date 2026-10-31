@@ -1,0 +1,76 @@
+{
+  "kind": "local-engineering-estimate",
+  "mode": "source",
+  "score": 34,
+  "max": 40,
+  "sections": [
+    {
+      "name": "打包完整性",
+      "score": 6,
+      "max": 8,
+      "details": [
+        "通过: 必需文件 README.md",
+        "通过: 必需文件 explain.json",
+        "通过: 必需文件 submission.py",
+        "提示: 目录模式无 manifest.json，打包时会生成"
+      ]
+    },
+    {
+      "name": "explain 文档",
+      "score": 4,
+      "max": 4,
+      "details": [
+        "通过: explain.json 字段合法且非空"
+      ]
+    },
+    {
+      "name": "提交契约",
+      "score": 4,
+      "max": 4,
+      "details": [
+        "通过: submission.py 导出 build_model"
+      ]
+    },
+    {
+      "name": "格式与安全",
+      "score": 8,
+      "max": 8,
+      "details": [
+        "通过: 所有文件都在白名单且路径安全"
+      ]
+    },
+    {
+      "name": "manifest 校验",
+      "score": 0,
+      "max": 4,
+      "details": [
+        "目录模式跳过 manifest 校验"
+      ]
+    },
+    {
+      "name": "五接口运行",
+      "score": 8,
+      "max": 8,
+      "details": [
+        "通过: build_model 构建耗时 1.1s",
+        "通过: 五接口方法全部运行"
+      ]
+    },
+    {
+      "name": "资源表现",
+      "score": 4,
+      "max": 4,
+      "details": [
+        "通过: 总耗时 1.1s，远低于开发评测 180s 墙钟"
+      ]
+    }
+  ],
+  "warnings": [
+    "通过: 未发现 stdout print"
+  ],
+  "meta": {
+    "zip_size": null,
+    "expanded": null,
+    "entries": 9
+  }
+}
