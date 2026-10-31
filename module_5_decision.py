@@ -1,14 +1,15 @@
 """模块5：充电决策。
 
-act 按 least-slack（最小松弛时间）优先，在可用容量内为当前连接且未完成的
-车辆分配请求功率，并结合分时电价做成本前冲/延后。行动限额只来自
-capacity_kw 与 forecast_capacity，绝不使用 intervention_capacity；每辆车
-不超过其 charger_limit_kw。
+act 用 TOPSIS 多指标评分（剩余需求、停留紧急性、电价价差）确定充电优先级，
+在可用容量内为当前连接且未完成的车辆分配功率；超过容量时按优先级实时削减。
+行动限额只来自 capacity_kw 与 forecast_capacity，绝不使用
+intervention_capacity；每辆车不超过其 charger_limit_kw。
 """
 from __future__ import annotations
 
 import math
-import statistics
+
+import numpy as np
 
 
 def _finite(value, default=0.0):
@@ -38,18 +39,50 @@ def _cheap_now(prices):
     """当前电价是否不高于今日剩余时段的电价中位数。"""
     if not prices:
         return True
-    future = [float(p) for p in prices[1:]]
-    if not future:
+    future = np.asarray([float(p) for p in prices[1:]], dtype=float)
+    if future.size == 0:
         return True
-    try:
-        reference = statistics.median(future)
-    except statistics.StatisticsError:
-        reference = float(prices[0])
-    return float(prices[0]) <= reference
+    return float(prices[0]) <= float(np.median(future))
 
 
-# 电价延后只在车辆有至少这一步的富余时启用，完成率优先于成本。
+def _price_advantage(prices, steps_left):
+    """充电“现在 vs 延后”的价差：未来窗口价格中位数减当前价，正=现在更划算。"""
+    if not prices:
+        return 0.0
+    current = float(prices[0])
+    horizon = max(1, int(steps_left))
+    future = np.asarray([float(p) for p in prices[1 : 1 + horizon]], dtype=float)
+    if future.size == 0:
+        return 0.0
+    return float(np.median(future)) - current
+
+
+# 电价延后只在车辆还有至少这一步的富余时启用，完成率优先于成本。
 _PRICE_DEFER_MARGIN_STEPS = 1.0
+
+# TOPSIS 指标权重：剩余需求、停留紧急性、电价价差。前两项决定完成率，
+# 权重更高；电价只影响削峰与成本，权重较低。
+_TOPSIS_WEIGHTS = np.array([0.45, 0.35, 0.20], dtype=float)
+
+
+def _topsis_scores(matrix, weights):
+    """对 n 辆车 x 3 个“越大越优先”指标做 TOPSIS 评分，返回 [0,1] 分数。"""
+    n = matrix.shape[0]
+    if n == 0:
+        return np.zeros(0)
+    if n == 1:
+        return np.array([1.0])
+
+    norms = np.sqrt((matrix ** 2).sum(axis=0))
+    norms = np.where(norms > 1e-12, norms, 1.0)
+    weighted = (matrix / norms) * weights
+
+    best = weighted.max(axis=0)
+    worst = weighted.min(axis=0)
+    d_best = np.sqrt(((weighted - best) ** 2).sum(axis=1))
+    d_worst = np.sqrt(((weighted - worst) ** 2).sum(axis=1))
+    denom = d_best + d_worst
+    return np.where(denom > 1e-12, d_worst / np.maximum(denom, 1e-12), 0.5)
 
 
 def act_edf(observation, predict_fn):
@@ -61,7 +94,7 @@ def act_edf(observation, predict_fn):
     prices = getattr(observation, "prices", ()) or ()
     cheap = _cheap_now(prices)
 
-    request = []
+    rows = []
     for vehicle in observation.vehicles:
         if vehicle.charging_complete:
             continue
@@ -81,27 +114,49 @@ def act_edf(observation, predict_fn):
         )
 
         # 预测说快充完但车辆仍未完成：保持桩上限推进，发现真实剩余需求。
-        if remaining < 0.05:
-            request.append((0.0, steps_left, vehicle.features.token, limit))
-            continue
-
-        # slack=剩余停留步数-剩余需求/(桩上限*dt)。负值表示按时满功率也
-        # 充不完，必须优先；正值表示有弹性，可前冲或延后。
-        demand_steps = remaining / (limit * dt)
-        slack = steps_left - demand_steps
-        just_in_time = remaining / (steps_left * dt)
-
-        if slack <= 0 or slack < _PRICE_DEFER_MARGIN_STEPS or cheap:
+        discover = remaining < 0.05
+        if discover:
+            score_remaining = limit * dt
             wanted = limit
         else:
-            wanted = min(just_in_time, limit)
-        wanted = min(max(wanted, 0.0), limit)
-        request.append((slack, steps_left, vehicle.features.token, wanted))
+            score_remaining = remaining
+            demand_steps = remaining / (limit * dt)
+            slack = steps_left - demand_steps
+            just_in_time = remaining / (steps_left * dt)
+            if slack <= 0 or slack < _PRICE_DEFER_MARGIN_STEPS or cheap:
+                wanted = limit
+            else:
+                wanted = min(just_in_time, limit)
+            wanted = min(max(wanted, 0.0), limit)
+
+        rows.append(
+            {
+                "token": vehicle.features.token,
+                "wanted": wanted,
+                "steps_left": steps_left,
+                "criteria": (
+                    score_remaining,
+                    1.0 / steps_left,
+                    _price_advantage(prices, steps_left),
+                ),
+            }
+        )
+
+    if not rows:
+        return {}
+
+    matrix = np.array([row["criteria"] for row in rows], dtype=float)
+    scores = _topsis_scores(matrix, _TOPSIS_WEIGHTS)
+    order = sorted(
+        range(len(rows)),
+        key=lambda idx: (-float(scores[idx]), rows[idx]["steps_left"]),
+    )
 
     power = {}
     capacity = _ev_capacity_kw(observation)
-    for _slack, _steps_left, token, wanted in sorted(request):
-        granted = min(wanted, capacity)
+    for idx in order:
+        token = rows[idx]["token"]
+        granted = min(rows[idx]["wanted"], capacity)
         power[token] = granted
         capacity -= granted
     return power
