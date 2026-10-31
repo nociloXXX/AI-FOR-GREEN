@@ -1,0 +1,13 @@
+{
+  "method": "five-module online model: data features -> ExtraTrees demand/dwell + weekday-hour arrivals -> physics world model -> counterfactual capacity rollout -> EDF charging decision",
+  "assumptions": [
+    "charger limit is known at arrival",
+    "demand and dwell are unchanged by the capacity intervention",
+    "future arrivals are modeled from public history, not known in advance"
+  ],
+  "limitations": [
+    "arrival features cannot capture all driver intent",
+    "rollout does not model battery taper",
+    "counterfactual response is model-internal physics, not real behavioral causal evidence"
+  ]
+}

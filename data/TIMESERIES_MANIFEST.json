@@ -1,0 +1,42 @@
+{
+  "cutoff_utc": "2020-01-01 00:00:00+00:00",
+  "resolution": "original observed timestamps, irregular approx4seconds",
+  "export": "no original filename/station/session/user IDs; independent session token",
+  "excluded_cutoff": 0,
+  "files": {
+    "caltech": {
+      "name": "timeseries_caltech.jsonl.gz",
+      "curves": 234,
+      "samples": 1432319,
+      "bytes": 9869298,
+      "sha256": "a1d36171f39621a277d223592c856b2623387d10c8967f881c5b1b52efa2046b",
+      "min_utc": "2018-06-04 17:40:53+00:00",
+      "max_utc": "2018-11-22 18:46:57+00:00"
+    },
+    "jpl": {
+      "name": "timeseries_jpl.jsonl.gz",
+      "curves": 157,
+      "samples": 991385,
+      "bytes": 3283081,
+      "sha256": "ff42ae527ed60c5b44c7825733c98d1fc1e29823f2d3588c259eadb91356cdfb",
+      "min_utc": "2018-10-09 02:04:13+00:00",
+      "max_utc": "2019-05-04 09:43:10+00:00"
+    },
+    "office1": {
+      "name": "timeseries_office1.jsonl.gz",
+      "curves": 25,
+      "samples": 101174,
+      "bytes": 1036016,
+      "sha256": "2f3aa4021cc3aaafd6fcbd76f612afef41e76279e381e64202fa78fdaf63659d",
+      "min_utc": "2019-03-26 18:33:56+00:00",
+      "max_utc": "2019-12-10 04:51:23+00:00"
+    }
+  },
+  "notes": [
+    "Observed measured signals, not synthesized oracle labels",
+    "JPL missing voltage/power preserved as null; never infer kW",
+    "Session tokens are arbitrary, not vehicle IDs",
+    "End-before-cutoff filter applies to whole session",
+    "Sparse selected curve collection, not complete site load history"
+  ]
+}
