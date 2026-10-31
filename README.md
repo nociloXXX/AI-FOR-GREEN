@@ -1,67 +1,55 @@
-# AI FOR GREEN
+# AI FOR GREEN Track A 提交模型
 
-Competition repository for the AI FOR GREEN challenge.
+面向《停车场充电世界模型》赛道的在线充电模型。提交入口是根目录
+`submission.py` 的 `build_model(training)`，返回对象实现五个接口方法。
 
-## 本地开发环境
+## 模型结构
 
-评测使用官方隔离 CPU 沙箱 `cpu-ml-methods-v3`，不联网、不装依赖。本地开发请按
-同一组固定版本安装，避免 pickle/joblib 或 LightGBM 模型跨版本不兼容：
+五个模块按 `数据 -> 预测 -> 世界模型 -> 干预推演 -> 充电决策` 组织：
+
+1. 数据处理 `module_1_data.py`：训练表整理与特征构造。
+2. 预测 `module_2_prediction.py`：LightGBM 双分支预测需求电量与停留时长，
+   星期×小时到达率表；`last_requested_energy_kwh` 缺失时自动退化。
+3. 世界模型 `module_3_world_model.py`：natural 条件的物理前向推演。
+4. 干预推演 `module_4_intervention.py`：capacity_edf 反事实容量推演。
+5. 充电决策 `module_5_decision.py`：完成率优先的 EDF 分配 + 价格延后绿色调度。
+
+## 接口输入输出
+
+- `predict(ArrivalFeatures) -> Prediction(demand_kwh, dwell_hours)`
+- `arrival_rate(site, hour, weekday) -> 每15分钟期望到达数`
+- `act(Observation) -> {token: 请求功率kW}`
+- `forecast(Observation, horizon_steps, intervention) -> {ev_load_kw, active_count}`
+- `explain() -> {method, assumptions, limitations}`
+
+## 假设
+
+- 充电桩额定上限在车辆到达时已知。
+- 需求电量与停留时长不受容量干预影响。
+- 未来到达由公开历史到达率建模，不是已知信息。
+
+## 局限
+
+- 到达特征无法完全捕捉驾驶员意图。
+- 前向推演不建模电池 taper。
+- 反事实响应是模型内部物理效应，不是真实用户行为的因果证据。
+
+## 运行环境
+
+官方离线 CPU 沙箱 `cpu-ml-methods-v3`：`numpy 1.26.4`、`pandas 2.1.4`、
+`scipy 1.11.4`、`scikit-learn 1.4.1.post1`、`torch 2.15.0+cpu`、
+`xgboost-cpu 3.1.3`、`lightgbm 4.6.0`、`statsmodels 0.14.6`。沙箱不联网。
+
+## 本地验证与打包
 
 ```bash
-python -m pip install -r requirements.txt
+python verify_submission.py
+python make_submission.py --source . --out my_submission.zip \
+  --include module_1_data.py module_2_prediction.py module_3_world_model.py \
+  module_4_intervention.py module_5_decision.py weights/*.txt
 ```
 
-关键版本：`lightgbm==4.6.0`、`xgboost==3.1.3`（官方包名为 `xgboost-cpu`，import
-仍为 `xgboost`）、`scikit-learn==1.4.1.post1`、`numpy==1.26.4`、`pandas==2.1.4`。
-离线预测权重由 `python train_module2_weights.py` 生成到 `weights/`；沙箱内只加载，
-不重新训练。
+## 协作
 
-## 加入协作（第一次）
-
-1. 接受邀请：打开 https://github.com/nociloXXX/AI-FOR-GREEN/invitations ，点 Accept。
-2. 装 Git（Windows）：https://git-scm.com/download/win ，一路默认安装。
-3. 打开终端，克隆仓库：
-
-   ```bash
-   git clone https://github.com/nociloXXX/AI-FOR-GREEN.git
-   cd AI-FOR-GREEN
-   ```
-
-4. 第一次配置身份：
-
-   ```bash
-   git config --global user.name "你的名字"
-   git config --global user.email "你的邮箱"
-   ```
-
-## 日常提交
-
-```bash
-git pull
-# 改代码
-git add .
-git commit -m "说明这次改了什么"
-git push origin main
-```
-
-第一次 push 会弹出浏览器让你登录 GitHub，登录一次后以后就不会再问。
-
-## 小提示
-
-- 开始工作前先 `git pull`，避免冲突。
-- 如果 push 被拒，先 `git pull` 再 push。
-- 不习惯命令行的话，可以装 GitHub Desktop（https://desktop.github.com/ ）用图形界面克隆和提交。
-
-## 基线模块结构
-
-1. 数据处理：`module_1_data.py`
-2. 预测：`module_2_prediction.py`
-3. 世界模型：`module_3_world_model.py`
-4. 干预推演：`module_4_intervention.py`
-5. 充电决策：`module_5_decision.py`
-
-提交入口是 `submission.py` 的 `build_model(training)`。本地先跑接口冒烟
-`python verify_submission.py`，再跑公开学习指标
-`python public_self_eval.py --submission . --training data/training_public.json --out public-metrics.json`；
-分站口径可跑 `python view_official.py`。打包用
-`python make_submission.py --source . --out my_submission.zip --include weights/*.txt`。
+仓库地址：https://github.com/nociloXXX/AI-FOR-GREEN
+日常流程：`git pull` -> 改代码 -> `git add .` -> `git commit` -> `git push origin main`。
