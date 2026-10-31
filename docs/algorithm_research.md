@@ -361,3 +361,42 @@
 7. GMM 联合建模 arrival/duration/energy → 未来到达的 demand/dwell 联合分布 → `module_3_world_model.py` → P2 → sklearn `GaussianMixture` 条件抽样，有富余时间再做。
 
 执行顺序：1、3 先做（P0），2 紧随；4、5、6 为 P1；7 有富余再做。所有改动后必须跑一遍完成率代理验证，守住三站门槛。
+
+## 12. P0 论文库与合规映射（2.1 轮）
+
+| 论文 | 类型 | 合规性 | 对应模块/文件 | 2.1 落地动作 |
+| --- | --- | --- | --- | --- |
+| IEEE Access 2024 需求预测综述 | 综述 | 合规，仅作方法论基线 | `module_1_data.py`、`module_2_prediction.py` | 指导 GBM/分位/迁移选型，不直接写代码 |
+| MQ-TCN 2024（跨站迁移） | 深度迁移 + 多分位 TCN | 禁训 DL，仅借鉴迁移思想 | `module_2_prediction.py` | pooled LightGBM + `site` 特征 + office1 标定收缩 |
+| 2026 地理可迁移性 | ML 六类方法比较 | 合规参考 | `module_2_prediction.py` | 迁移前做站点相似度/标定，不盲目迁移 |
+| Zhang 2020 分位数组合密度预测 | 分位预测组合 | 合规 | `module_2_prediction.py`、`module_3_world_model.py` | 多分位输出组合成 demand/dwell 区间，注入 rollout |
+| Lee 2021 ACN | 凸优化 + MPC 调度 | 合规，轻量实现 | `module_5_decision.py` | MPC 前瞻 + 过订阅分配，EDF/LLF 基线 |
+| LAPSE 2023 GA 调度 | 遗传算法元启发式 | 仅离线参考 | 无 | 不接在线路径，可作离线对照 |
+| Liu 1973 | EDF/LLF 经典调度 | 合规 | `module_5_decision.py` | LLF 排序键落地 |
+| Energy Informatics 2023 MPC 负荷塑形 | MPC 约束优化 | 合规 | `module_4_intervention.py`、`module_5_decision.py` | capacity_edf 的 MPC/负荷塑形对照 |
+| Cai 2022 分位预测 + 时移充电 | 分位回归 + 调度 | 合规 | `module_2_prediction.py`、`module_3_world_model.py`、`module_5_decision.py` | demand/dwell 分位 + 价格时移 |
+
+2.1 落地顺序：`module_5_decision` 的 LLF（P0）→ `module_2_prediction` 的 pooled + office1 标定（P0）→ demand/dwell 分位数（P1）→ `module_3_world_model` 分位注入（P1）→ `module_4_intervention` 保持双基线合规并跑完成率代理验证。
+
+## 13. 2.1 P0 可落地方案
+
+### P0-1 小样本 + 跨站迁移 + 分位数回归（→ 数据处理、预测）
+
+- 特征：`sin/cos(hour)`、`weekday`、`site` 独热、`charger_limit_kw`；`last_requested_energy_kwh` 保留“缺失指示 + 有效值”双分支，但缺失时不得当 0、不得当目标。
+- 跨站迁移：训练一个全站 pooled LightGBM（含 `site` 特征），再为 office1 做输出标定收缩：`pred_office = α·site_model + (1-α)·pooled_model`，α 在 office1 时间序 holdout 上从 `{0,0.3,0.5,0.7,1}` 选；或做乘性偏差校正 `scale = mean(demand)/mean(pred)`。
+- 分位数回归：sklearn `HistGradientBoostingRegressor(loss="quantile")` 分别出 demand/dwell 的 q50/q75/q90；dwell 试 `log1p` 目标再反变换；q50 做点预测，q75/q90 给调度保守值。
+- 验收：office1 demand MAE 低于 6.2444、dwell MAE 低于 1.5617；仍按时间序切分，不随机打散。
+
+### P0-2 最小松弛优先（LLF）在线调度（→ 充电决策）
+
+- 每辆在场未完成车计算：`remaining_energy = max(demand_pred - delivered, 0)`、`steps_left = max(1, ceil(dwell_pred/dt - elapsed_steps))`、`time_to_finish = remaining_energy / (charger_limit_kw·dt)`、`laxity = steps_left - time_to_finish`。
+- 按 `laxity` 升序分配功率（laxity 小者最紧急），每辆最多给 `min(charger_limit, remaining_energy/dt)`，直到可用容量用完。
+- “现在已紧”保护：任一辆 `laxity ≤ 0` 或 `laxity ≤ safety_margin`（如 1 步）时立即满充，不允许价格延后；价格延后只作用于 `laxity > threshold` 的车辆。
+- 参考 Lee 2021 ACN 的 MPC 为可选 P2，EDF/LLF 作为基线；验收用 `public_self_eval.py` 核对三站完成率不下降。
+
+### P0-3 先保完成基线、再削峰（→ 充电决策）
+
+- 两阶段：先按 LLF/EDF 算出“保证在预测停留内完成”的基线功率；再把正松弛车辆的富余电量按电价从高到低延后到低价步，绝不把 `laxity≤0` 的车辆延后。
+- 约束优先：完成率硬约束 > 峰值/成本目标；Energy Informatics 2023 的目标 `min ||目标负荷 - 实际负荷||²` 只在完成基线满足后作用于剩余灵活性。
+- 用 2022 概率预测思路：dwell/energy 的分位预测决定“多少松弛可以安全被移动”。
+- 验收：先看完成率不回退，再看峰值/成本改善；二者冲突时以完成率为准。
