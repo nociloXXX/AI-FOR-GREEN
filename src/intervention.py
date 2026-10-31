@@ -102,8 +102,10 @@ def simulate_intervention(pred, dispatch, capacity_kw, step_hours=None, state=No
     """对一段候选调度做前向推演评分，返回越限、削峰、弃充与收益。
 
     当给出 ``state`` 时，按世界模型逐段推演，并用推演终点真正没充上的电量
-    作为弃充口径；否则退回纯曲线口径，用逐段正缺口 ``pred - dispatch`` 估算
-    弃充。两种口径都只依赖预测值与当前状态，不读取未来真实数据。
+    作为 ``unmet_kwh``（在线口径）；否则退回纯曲线口径，用逐段正缺口
+    ``pred - dispatch`` 估算。离线有真实标签时用
+    ``evaluate.decision_metrics`` 的 ``actual - dispatch`` 口径，二者不应混用。
+    推演只依赖预测值与当前状态，不读取未来真实数据。
     """
     pred = np.asarray(pred, dtype=float).reshape(-1)
     dispatch = np.asarray(dispatch, dtype=float).reshape(-1)
@@ -148,6 +150,7 @@ def simulate_intervention(pred, dispatch, capacity_kw, step_hours=None, state=No
         "peak_before_kw": round(peak_before, 3),
         "peak_after_kw": round(peak_after, 3),
         "overflow_kwh": round(overflow_kwh, 3),
+        # unmet_kwh 是在线推演的统一口径；curtailment_kwh 保留为同义别名。
         "curtailment_kwh": round(curtailment_kwh, 3),
         "unmet_kwh": round(curtailment_kwh, 3),
         "score": round(score, 3),

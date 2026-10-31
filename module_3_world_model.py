@@ -40,13 +40,21 @@ def _remaining_steps(pred: Prediction, dt_hours: float, elapsed_steps: int) -> i
     return max(1, steps)
 
 
-def rollout(observation, horizon_steps, predict_fn, arrival_rate_fn, capacity_fn):
+def rollout(
+    observation,
+    horizon_steps,
+    predict_fn,
+    arrival_rate_fn,
+    capacity_fn,
+    priority_key=None,
+):
     """通用前向推演。
 
     车辆状态用 ``[剩余需求kWh, 剩余停留步数, 桩功率上限kW]`` 表示；每步先
     按期望到达补入新车，再统计仍在场且未完成的车数，按容量分配功率，最后
     全体车辆停留步数减一。``capacity_fn(step)`` 返回本步可用充电功率，传
-    ``float("inf")`` 即自然满功率充电。
+    ``float("inf")`` 即自然满功率充电。``priority_key`` 省略时按剩余停留
+    步数升序（最早离开优先，EDF）分配，也可传入自定义排序键。
     """
     dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
     horizon = max(0, int(_finite(horizon_steps, default=0.0)))
@@ -101,7 +109,8 @@ def rollout(observation, horizon_steps, predict_fn, arrival_rate_fn, capacity_fn
         active.append(int(len(valid)))
         cap = _finite(capacity_fn(step), default=0.0, allow_inf=True)
         load = 0.0
-        for car in sorted(valid, key=lambda item: item[1]):
+        key = priority_key or (lambda item: item[1])
+        for car in sorted(valid, key=key):
             power = min(car[2], car[0] / dt, cap)
             car[0] -= power * dt
             cap -= power

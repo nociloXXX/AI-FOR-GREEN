@@ -162,22 +162,40 @@ def lp_load_shift(predicted_power_kw, capacity_kw, price=None, step_hours=None):
 
 
 def mpc_schedule(predicted_power_kw, capacity_kw, horizon_steps=None, price=None):
-    """模型预测控制：滚动窗口只取第一步，用未来一小段预测值做有前瞻调度。
+    """滚动调度：跨窗口积压队列保证能量守恒，电价可做谷段补。
 
-    这里的前瞻只来自预测模块给出的 ``predicted_power_kw``（预测值），不会
-    读取任何未来真实数据；在线评测若要求零前瞻，直接使用默认的
-    ``causal_load_shift`` 即可。
+    每个窗口内超容的电量不再被当作弃充丢弃，而是记入积压队列，由后续
+    谷段（或更便宜的时段）消化。无电价时与 ``causal_load_shift`` 等价；
+    有电价时优先在相对便宜的时段消化积压，兼顾成本。只使用预测值做前瞻，
+    不读取未来真实数据。
     """
     pred = np.asarray(predicted_power_kw, dtype=float).reshape(-1)
+    cap = float(capacity_kw)
     horizon = max(1, int(horizon_steps or getattr(C, "MPC_HORIZON_STEPS", 4)))
+    step_h = C.STEP_MINUTES / 60.0
     prices = np.asarray(price, dtype=float).reshape(-1) if price is not None else None
 
     dispatch = np.empty_like(pred)
+    backlog_kwh = 0.0
     for t in range(pred.size):
-        window = pred[t : t + horizon]
-        wprice = prices[t : t + horizon] if prices is not None else None
-        first, _ = lp_load_shift(window, capacity_kw, price=wprice)
-        dispatch[t] = first[0]
+        load = float(pred[t])
+        if load > cap:
+            dispatch[t] = cap
+            backlog_kwh += (load - cap) * step_h
+            continue
+
+        headroom = cap - load
+        serve_kw = 0.0
+        if backlog_kwh > 1e-12 and headroom > 1e-12:
+            max_serve = min(backlog_kwh / step_h, headroom)
+            if prices is None:
+                serve_kw = max_serve
+            else:
+                future = prices[t + 1 : t + horizon]
+                if future.size == 0 or float(prices[t]) <= float(np.median(future)):
+                    serve_kw = max_serve
+        dispatch[t] = load + serve_kw
+        backlog_kwh = max(backlog_kwh - serve_kw * step_h, 0.0)
     return dispatch
 
 
@@ -278,7 +296,9 @@ def choose_dispatch(
     dispatch, info = evaluate_candidates(
         pred, candidates, capacity_kw, step_hours, state=state
     )
-    unmet = np.maximum(pred - dispatch, 0.0)
+    # 在线口径：与干预推演一致，取世界模型推演终点仍未充上的电量（kWh），
+    # 而不是逐段 pred-dispatch 的瞬时缺口；离线真值口径见 evaluate.decision_metrics。
+    unmet = float(info.get("unmet_kwh", 0.0))
     return dispatch, unmet, _clean_plan_info(info)
 
 
