@@ -7,8 +7,45 @@ from .decision import choose_dispatch
 from .evaluate import decision_metrics, forecast_metrics
 from .features import add_lag_features, add_time_features, build_station_load_curve
 from .predict import train_predictor
-from .state_model import StationState
+from .state_model import StationState, VehicleSession
 from .submit import write_submission
+
+
+def _seed_station_state(station, station_sessions, val_start, capacity_kw):
+    """用验证期开始时仍在场的真实会话灌入世界模型。
+
+    按会话已过去的时间比例估算剩余电量，逐个占桩，超出的排入队列。这样
+    后续 choose_dispatch 的前向推演才会计入“本已存在的未满足电量”。
+    """
+    num_piles = C.STATION_PILES.get(station, 4)
+    state = StationState.build(
+        station, num_piles, capacity_kw=capacity_kw, time=val_start
+    )
+    active = station_sessions[
+        (station_sessions[C.TIME_START] <= val_start)
+        & (station_sessions[C.TIME_END] > val_start)
+    ]
+    for row in active.itertuples():
+        start = getattr(row, C.TIME_START)
+        end = getattr(row, C.TIME_END)
+        energy = float(getattr(row, C.ENERGY_COL))
+        elapsed = (val_start - start).total_seconds() / 3600.0
+        duration = max((end - start).total_seconds() / 3600.0, 1e-6)
+        remaining = energy * max(1.0 - elapsed / duration, 0.0)
+        if remaining <= 1e-9:
+            continue
+        session = VehicleSession(
+            vehicle_id=str(getattr(row, C.PILE_COL)),
+            energy_kwh=remaining,
+            max_power_kw=float(getattr(row, C.MAX_POWER_COL)),
+            arrival_time=start,
+        )
+        free_pile = next((pile for pile in state.piles if not pile.busy), None)
+        if free_pile is not None:
+            free_pile.attach(session)
+        else:
+            state.queue.append(session)
+    return state
 
 
 def run():
@@ -34,10 +71,14 @@ def run():
         model, pred = train_predictor(train, val)
         metrics = forecast_metrics(val[C.LOAD_COL].values, pred)
 
-        # 3. 世界模型：实例化场站状态，供干预推演与决策读取。
+        # 3. 世界模型：用验证期开始时的在充会话灌入状态，再交干预推演。
         capacity = C.STATION_CAPACITY_KW.get(station, 200)
-        state = StationState.build(
-            station, C.STATION_PILES.get(station, 4), capacity_kw=capacity
+        station_sessions = sessions[sessions[C.STATION_COL] == station]
+        state = _seed_station_state(
+            station,
+            station_sessions,
+            val["timestamp"].iloc[0],
+            capacity,
         )
 
         # 4 + 5. 干预推演与充电决策：对候选干预推演评分后选择最优调度。

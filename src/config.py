@@ -31,14 +31,21 @@ BATTERY_EFFICIENCY = 0.95
 BATTERY_SOC_MIN = 0.1
 BATTERY_SOC_MAX = 1.0
 
-# 合成数据里每个场站的变压器容量上限（kW）。真实比赛替换为官方给出的容量。
+# 离线合成数据（站点 A/B/C）的变压器容量上限（kW）。真实评测站点是
+# caltech / jpl / office1，站点容量逐场景由 Observation.capacity_kw /
+# forecast_capacity 给出，不是这里的固定值。
 STATION_CAPACITY_KW = {
     "A": 300,
     "B": 400,
     "C": 200,
 }
 
-# 每个场站的充电桩数量。真实比赛替换为官方给的桩数口径。
+# 官方固定口径：充电桩额定 6.6 kW；站点容量不设固定默认，下面这个值只作
+# 为没有观测容量可读时的保守回退，避免历史代码落到 500 kW 的死值。
+OFFICIAL_CHARGER_LIMIT_KW = 6.6
+DEFAULT_STATION_CAPACITY_KW = OFFICIAL_CHARGER_LIMIT_KW
+
+# 离线合成数据每个场站的充电桩数量。真实评测的在场车辆从 Observation 读取。
 STATION_PILES = {
     "A": 6,
     "B": 8,

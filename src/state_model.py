@@ -303,17 +303,19 @@ class StationState:
             self.price_yuan_per_kwh = float(price_yuan_per_kwh)
         step_hours = max(0.0, float(step_hours))
         limit = float(power_limit_kw) if power_limit_kw is not None else self.capacity_kw
-        if self.time is not None:
-            self.time = _shift_time(self.time, step_hours)
+        step_start = self.time
 
         arrivals = list(arrivals)
         for arrival in arrivals:
-            session = VehicleSession.from_arrival(arrival, time=self.time)
+            session = VehicleSession.from_arrival(arrival, time=step_start)
             free_piles = [pile for pile in self.piles if not pile.busy]
             if free_piles:
                 free_piles[0].attach(session)
             else:
                 self.queue.append(session)
+
+        if self.time is not None:
+            self.time = _shift_time(self.time, step_hours)
 
         requested: Dict[str, float] = {}
         for pile in self.piles:
