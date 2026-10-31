@@ -9,3 +9,4 @@ BACKUP_INFO.md
 data/training_*.json
 data/training_public.json
 data/timeseries_*.jsonl.gz
+data/TIMESERIES_MANIFEST.json
