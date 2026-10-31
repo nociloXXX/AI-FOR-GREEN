@@ -150,6 +150,97 @@ def _rollout_with_counts(
     return {"ev_load_kw": loads, "active_count": active}
 
 
+def _rollout_expected(
+    observation,
+    horizon_steps,
+    predict_fn,
+    arrival_rate_fn,
+    capacity_fn,
+    future_cohorts_fn,
+    survival_fn=None,
+    arrival_calibration_fn=None,
+    occupancy_multiplier_fn=None,
+):
+    """确定性期望路径：整数物化未来车辆，联合 demand/dwell cohort。"""
+    dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
+    horizon = max(0, int(_finite(horizon_steps, default=0.0)))
+    cars = []
+    for vehicle in observation.vehicles:
+        if vehicle.charging_complete:
+            continue
+        pred = predict_fn(vehicle.features)
+        remaining = max(
+            _finite(getattr(pred, "demand_kwh", 0.0), default=0.0)
+            - _finite(vehicle.delivered_kwh, default=0.0),
+            0.0,
+        )
+        if remaining <= 1e-8:
+            continue
+        elapsed_hours = _finite(vehicle.elapsed_steps, default=0.0) * dt
+        dwell_remaining = pred.dwell_hours - elapsed_hours
+        if survival_fn is not None:
+            dwell_remaining = survival_fn(
+                observation.site, pred.dwell_hours, elapsed_hours, dt
+            )
+        cars.append(
+            [
+                remaining,
+                max(1, int(math.ceil(_finite(dwell_remaining, default=dt) / dt))),
+                max(_finite(vehicle.features.charger_limit_kw, default=0.0), 0.0),
+            ]
+        )
+
+    occ = (
+        occupancy_multiplier_fn(observation, horizon)
+        if occupancy_multiplier_fn is not None
+        else 1.0
+    )
+    calibration = (
+        arrival_calibration_fn(observation, horizon)
+        if arrival_calibration_fn is not None
+        else None
+    )
+    loads = []
+    active = []
+    acc = 0.0
+    cohort_index = 0
+    for step in range(horizon):
+        hour, weekday = _step_hour_weekday(observation, step, dt)
+        rate = max(_finite(arrival_rate_fn(observation.site, hour, weekday)), 0.0)
+        rate *= max(_finite(occ, default=1.0), 0.0)
+        if calibration is not None and step < len(calibration):
+            rate *= max(_finite(calibration[step], default=1.0), 0.0)
+        acc += rate
+        while acc >= 1.0:
+            cohorts = future_cohorts_fn(observation.site, hour, weekday)
+            demand, dwell, _weight = cohorts[cohort_index % len(cohorts)]
+            cars.append(
+                [
+                    max(_finite(demand), 0.0),
+                    max(1, int(math.ceil(_finite(dwell, default=dt) / dt))),
+                    6.6,
+                ]
+            )
+            cohort_index += 1
+            acc -= 1.0
+
+        valid = [car for car in cars if car[0] > 1e-8 and car[1] > 0]
+        active.append(len(valid))
+        cap = _finite(capacity_fn(step), default=0.0, allow_inf=True)
+        load = 0.0
+        ordered = sorted(valid, key=lambda car: car[1]) if cap != math.inf else valid
+        for car in ordered:
+            power = min(car[2], car[0] / dt, cap)
+            car[0] -= power * dt
+            cap -= power
+            load += power
+        for car in cars:
+            car[1] -= 1
+        cars = [car for car in cars if car[0] > 1e-8 and car[1] > 0]
+        loads.append(max(0.0, float(load)))
+    return {"ev_load_kw": loads, "active_count": active}
+
+
 def rollout(
     observation,
     horizon_steps,
@@ -162,6 +253,10 @@ def rollout(
     predict_quantiles_fn=None,
     sample_fn=None,
     seed=0,
+    future_cohorts_fn=None,
+    survival_fn=None,
+    arrival_calibration_fn=None,
+    occupancy_multiplier_fn=None,
 ):
     """通用前向推演。
 
@@ -174,6 +269,19 @@ def rollout(
     ``arrival_quantiles`` 给多个分位时，把各情景轨迹求平均作为稳健单路径；
     传空元组则退回旧的“期望到达累加器”口径。
     """
+    if future_cohorts_fn is not None:
+        return _rollout_expected(
+            observation,
+            horizon_steps,
+            predict_fn,
+            arrival_rate_fn,
+            capacity_fn,
+            future_cohorts_fn,
+            survival_fn,
+            arrival_calibration_fn,
+            occupancy_multiplier_fn,
+        )
+
     if sample_fn is not None:
         # 条件密度/GMM 注入：单条采样路径。natural 与 capacity_edf 由调用方
         # 传同一个 sample_fn 与 seed，保证注入序列逐车一致。
@@ -251,6 +359,10 @@ def forecast_natural(
     predict_quantiles_fn=None,
     sample_fn=None,
     seed=0,
+    future_cohorts_fn=None,
+    survival_fn=None,
+    arrival_calibration_fn=None,
+    occupancy_multiplier_fn=None,
 ):
     """自然充电推演：不施加站点容量限制，按桩功率上限充到完成或离开。"""
     return rollout(
@@ -262,4 +374,8 @@ def forecast_natural(
         predict_quantiles_fn=predict_quantiles_fn,
         sample_fn=sample_fn,
         seed=seed,
+        future_cohorts_fn=future_cohorts_fn,
+        survival_fn=survival_fn,
+        arrival_calibration_fn=arrival_calibration_fn,
+        occupancy_multiplier_fn=occupancy_multiplier_fn,
     )

@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from acn_causal.student_api import Prediction
+from acn_causal.student_api import ArrivalFeatures, Prediction
 
 
 _SITES = ("caltech", "jpl", "office1")
@@ -19,6 +19,8 @@ _QUANTILE_LEVELS = (0.5, 0.75, 0.9)
 _DWELL_QUANTILE_LEVELS = (0.1, 0.25, 0.5, 0.75, 0.9)
 _HIST_SEEDS = (20261008, 20261009)
 _HALF_LIFE = {"caltech": 90.0, "jpl": 15.0, "office1": 180.0}
+_CHARGER_KW = 6.6
+_SURVIVAL_BINS = (0.0, 1.5, 3.0, 6.0, 9.0, 12.0, 18.0, 24.0)
 
 
 def _features_base(hour, weekday, pmax):
@@ -252,10 +254,102 @@ def _build_future_sampler(training):
     return FutureSampler(emp_demand_q, emp_dwell_q, gmms)
 
 
+def _build_joint_cohorts(frame):
+    """按停留时长排序的经验联合分位 cohort：保留 demand 与 dwell 的相关性。"""
+    demand = np.asarray(frame["demand_kwh"], dtype=float)
+    dwell = np.asarray(frame["dwell_hours"], dtype=float)
+    valid = np.isfinite(demand) & (demand > 0) & np.isfinite(dwell) & (dwell > 0)
+    demand, dwell = demand[valid], dwell[valid]
+    if len(demand) == 0:
+        return ((10.0, 4.0, 1.0),)
+    order = np.argsort(dwell)
+    demand, dwell = demand[order], dwell[order]
+    buckets = np.array_split(np.arange(len(demand)), 5)
+    cohorts = []
+    for idx in buckets:
+        if len(idx) == 0:
+            continue
+        d = float(np.median(demand[idx]))
+        w = float(np.median(dwell[idx]))
+        d = min(d, _CHARGER_KW * w)
+        cohorts.append((d, w, 1.0 / 5.0))
+    if not cohorts:
+        return ((10.0, 4.0, 1.0),)
+    return tuple(cohorts)
+
+
+def _build_survival_residuals(frame, predicted_dwell):
+    """离线学习“已停 lower 小时后，剩余停留比预测多/少多少”。"""
+    actual = np.asarray(frame["dwell_hours"], dtype=float)
+    predicted = np.asarray(predicted_dwell, dtype=float)
+    valid = np.isfinite(actual) & np.isfinite(predicted)
+    actual, predicted = actual[valid], predicted[valid]
+    residuals = {}
+    for lower in _SURVIVAL_BINS:
+        survived = actual > lower + 1e-8
+        if survived.sum() < 12:
+            continue
+        actual_remaining = np.maximum(actual[survived] - lower, 0.25)
+        predicted_remaining = np.maximum(predicted[survived] - lower, 0.25)
+        residuals[lower] = float(
+            np.clip(
+                np.median(actual_remaining - predicted_remaining),
+                -8.0,
+                8.0,
+            )
+        )
+    return residuals
+
+
+def _build_occupancy_regressions(frame):
+    """离线学习“当前在场车数 -> 未来 12 步到达数”的粗回归。"""
+    import math as _math
+
+    timestamps = pd.to_datetime(frame["day"], errors="coerce")
+    daily = []
+    for day, rows in frame.groupby(timestamps.dt.date, sort=True):
+        if pd.isna(day):
+            continue
+        active = np.zeros(96, dtype=float)
+        arrivals = np.zeros(96, dtype=float)
+        for record in rows.itertuples(index=False):
+            hour = float(record.hour)
+            dwell = float(record.dwell_hours)
+            if not _math.isfinite(hour) or not _math.isfinite(dwell):
+                continue
+            arrival = min(max(int(hour * 4.0), 0), 95)
+            capped = min(max(dwell, 0.25), (96 - arrival) * 0.25)
+            departure = min(96, arrival + max(1, int(_math.ceil(capped / 0.25))))
+            active[arrival:departure] += 1.0
+            arrivals[arrival] += 1.0
+        daily.append((active, arrivals))
+    if not daily:
+        return {}
+
+    regressions = {}
+    for origin in range(0, 96, 12):
+        current = np.asarray([entry[0][origin] for entry in daily])
+        future = np.asarray(
+            [entry[1][origin + 1 : origin + 12].sum() for entry in daily]
+        )
+        variance = float(np.var(current))
+        slope = (
+            float(np.cov(current, future, bias=True)[0, 1] / variance)
+            if variance > 1e-8
+            else 0.0
+        )
+        regressions[origin] = (
+            max(0.0, float(np.mean(future) - max(0.0, slope) * np.mean(current))),
+            max(0.0, slope),
+        )
+    return regressions
+
+
 class PredictionModule:
     """车辆级需求/停留预测。"""
 
-    KNN_WEIGHT = 0.5
+    DEMAND_KNN_WEIGHT = 0.3
+    DWELL_KNN_WEIGHT = 0.5
 
     def __init__(self, training):
         self.request_medians = _request_medians(training)
@@ -284,7 +378,7 @@ class PredictionModule:
                     frame.hour, frame.weekday, frame.charger_limit_kw
                 )
                 self.demand_model[site] = _fit_hist_quantile(
-                    xb, frame.demand_kwh.to_numpy(), 0.5, False, None, 0
+                    xb, frame.demand_kwh.to_numpy(), 0.5, True, None, 0
                 )
                 self.dwell_model[site] = _fit_hist_quantile(
                     xb, frame.dwell_hours.to_numpy(), 0.5, True, None, 0
@@ -319,7 +413,68 @@ class PredictionModule:
                 for q in _DWELL_QUANTILE_LEVELS
             }
         self.future_sampler = _build_future_sampler(training)
+        self.future_cohorts_table = {}
+        self.cohort_models = {}
+        self.survival_residuals = {}
+        self.occupancy_regressions = {}
+        self.weekday_days = {}
+        for site in _SITES:
+            frame = training[site]
+            requested = (
+                np.asarray(frame["last_requested_energy_kwh"], dtype=float)
+                if "last_requested_energy_kwh" in frame.columns
+                else np.full(len(frame), np.nan)
+            )
+            valid = np.isfinite(requested) & (requested > 0.0)
+            request_filled = np.where(valid, requested, self.request_medians[site])
+            request_missing = (~valid).astype(float)
+            if site == "office1":
+                x = _features_base(
+                    frame.hour, frame.weekday, frame.charger_limit_kw
+                )
+            else:
+                x = _features_full(
+                    frame.hour, frame.weekday, frame.charger_limit_kw,
+                    request_filled, request_missing,
+                )
+            predicted_dwell = self._model_predict(self.dwell_model[site], x)
+            self.future_cohorts_table[site] = _build_joint_cohorts(frame)
+            self.survival_residuals[site] = _build_survival_residuals(
+                frame, predicted_dwell
+            )
+            self.occupancy_regressions[site] = _build_occupancy_regressions(frame)
+            days = pd.date_range(frame.day.min(), frame.day.max(), freq="D")
+            self.weekday_days[site] = np.bincount(
+                days.dayofweek, minlength=7
+            ).astype(float)
+            from sklearn.ensemble import ExtraTreesRegressor
+
+            if site == "office1":
+                cohort_x = _features_base(
+                    frame.hour, frame.weekday, frame.charger_limit_kw
+                )
+            else:
+                cohort_x = _features_full(
+                    frame.hour, frame.weekday, frame.charger_limit_kw,
+                    request_filled, request_missing,
+                )
+            cohort_model = ExtraTreesRegressor(
+                n_estimators=192,
+                min_samples_leaf=8,
+                max_depth=16,
+                max_features=0.8,
+                n_jobs=1,
+                random_state=20261008,
+            )
+            cohort_model.fit(
+                cohort_x,
+                np.column_stack(
+                    [frame.demand_kwh.to_numpy(), frame.dwell_hours.to_numpy()]
+                ),
+            )
+            self.cohort_models[site] = cohort_model
         self._cache = {}
+        self._cohort_cache = {}
 
     @staticmethod
     def _model_predict(model, x):
@@ -366,12 +521,11 @@ class PredictionModule:
                 )
             demand = float(self._model_predict(self.demand_model[features.site], x)[0])
             dwell = float(self._model_predict(self.dwell_model[features.site], x)[0])
-            if features.site == "office1" and self.KNN_WEIGHT > 0.0:
+            if features.site == "office1":
                 kd, kw = self._knn_estimate(features)
-                demand = (1.0 - self.KNN_WEIGHT) * demand + self.KNN_WEIGHT * kd
-                dwell = (1.0 - self.KNN_WEIGHT) * dwell + self.KNN_WEIGHT * kw
-            if features.site != "office1":
-                demand = min(demand, float(features.charger_limit_kw) * dwell)
+                demand = (1.0 - self.DEMAND_KNN_WEIGHT) * demand + self.DEMAND_KNN_WEIGHT * kd
+                dwell = (1.0 - self.DWELL_KNN_WEIGHT) * dwell + self.DWELL_KNN_WEIGHT * kw
+            demand = min(demand, float(features.charger_limit_kw) * dwell)
             self._cache[key] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),
@@ -405,3 +559,120 @@ class PredictionModule:
         weekday = int(weekday) % 7
         bin_idx = int(np.floor(hour * 4.0)) % nbins
         return float(table[weekday, bin_idx])
+
+    def future_cohorts(self, site, hour, weekday):
+        key = (site, round(float(hour) % 24.0, 4), int(weekday) % 7)
+        cached = self._cohort_cache.get(key)
+        if cached is not None:
+            return cached
+        model = self.cohort_models.get(site)
+        if model is None:
+            value = self.future_cohorts_table.get(site, ((10.0, 4.0, 1.0),))
+            self._cohort_cache[key] = value
+            return value
+
+        hour = float(hour) % 24.0
+        weekday = int(weekday) % 7
+        if site == "office1":
+            x = _features_base([hour], [weekday], [6.6])
+        else:
+            x = _features_full(
+                [hour], [weekday], [6.6],
+                [self.request_medians[site]], [1.0],
+            )
+        point = self.predict(
+            ArrivalFeatures("cohort", site, hour, weekday, 6.6, None)
+        )
+        tree_pred = np.asarray(
+            [tree.predict(x)[0] for tree in model.estimators_], dtype=float
+        )
+        if len(tree_pred) == 0:
+            value = ((point.demand_kwh, point.dwell_hours, 1.0),)
+            self._cohort_cache[key] = value
+            return value
+
+        tree_pred = tree_pred[np.argsort(tree_pred[:, 1])]
+        picks = [int(round(q * (len(tree_pred) - 1))) for q in (0.1, 0.3, 0.5, 0.7, 0.9)]
+        selected = tree_pred[picks].copy()
+        demand_scale = point.demand_kwh / max(float(np.mean(selected[:, 0])), 1e-8)
+        dwell_scale = point.dwell_hours / max(float(np.mean(selected[:, 1])), 1e-8)
+        selected[:, 0] *= demand_scale
+        selected[:, 1] *= dwell_scale
+        selected[:, 1] = np.clip(selected[:, 1], 0.25, 24.0)
+        selected[:, 0] = np.minimum(
+            np.clip(selected[:, 0], 0.01, 150.0), _CHARGER_KW * selected[:, 1]
+        )
+        value = tuple(
+            (float(d), float(w), 0.2) for d, w in selected
+        )
+        self._cohort_cache[key] = value
+        return value
+
+    def survival_remaining_hours(
+        self, site, predicted_dwell_hours, elapsed_hours, dt_hours
+    ):
+        predicted = max(float(predicted_dwell_hours), float(dt_hours))
+        elapsed = max(0.0, float(elapsed_hours))
+        base = max(float(dt_hours), predicted - elapsed)
+        residuals = self.survival_residuals.get(site)
+        if not residuals or elapsed + 1e-8 < predicted:
+            return base
+        eligible = [lower for lower in residuals if lower <= elapsed + 1e-8]
+        if not eligible:
+            return base
+        return max(float(dt_hours), base + 0.5 * residuals[max(eligible)])
+
+    def arrival_multipliers(self, observation, steps):
+        multipliers = np.ones(max(0, int(steps)), dtype=float)
+        history = np.asarray(observation.historical_arrivals, dtype=float)
+        if multipliers.size == 0 or len(history) == 0:
+            return multipliers
+        if not np.isfinite(history).all() or (history < 0).any():
+            return multipliers
+        site_days = self.weekday_days.get(
+            observation.site, np.ones(7, dtype=float)
+        )
+        window = min(multipliers.size, len(history))
+        for offset in range(window):
+            absolute_hour = (
+                float(observation.local_hour)
+                + offset * float(observation.dt_hours)
+            )
+            hour = absolute_hour % 24.0
+            weekday = (
+                int(observation.weekday) + int(absolute_hour // 24.0)
+            ) % 7
+            days = max(float(site_days[weekday]), 1.0)
+            expected = (
+                self.arrival_rate(observation.site, hour, weekday) * days
+            )
+            ratio = float(history[offset]) / max(expected, 0.25)
+            multipliers[offset] = float(
+                np.clip(1.0 + 0.3 * (np.clip(ratio, 0.5, 1.5) - 1.0), 0.85, 1.15)
+            )
+        return multipliers
+
+    def occupancy_multiplier(self, observation, steps):
+        if int(steps) < 2:
+            return 1.0
+        regressions = self.occupancy_regressions.get(observation.site, {})
+        origin = int(observation.step // 12 * 12)
+        regression = regressions.get(origin)
+        if regression is None:
+            return 1.0
+        intercept, slope = regression
+        predicted_future = max(0.0, intercept + slope * len(observation.vehicles))
+        base_future = 0.0
+        for offset in range(1, min(int(steps), 12)):
+            absolute_hour = (
+                float(observation.local_hour)
+                + offset * float(observation.dt_hours)
+            )
+            hour = absolute_hour % 24.0
+            weekday = (
+                int(observation.weekday) + int(absolute_hour // 24.0)
+            ) % 7
+            base_future += self.arrival_rate(observation.site, hour, weekday)
+        if base_future <= 1e-8:
+            return 1.0
+        return float(np.clip(predicted_future / base_future, 0.5, 2.0))

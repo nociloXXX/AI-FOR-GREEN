@@ -33,6 +33,18 @@ class FiveModuleModel:
     def future_sampler(self):
         return self.prediction.future_sampler
 
+    def future_cohorts(self, site, hour, weekday):
+        return self.prediction.future_cohorts(site, hour, weekday)
+
+    def survival_remaining_hours(self, site, dwell, elapsed, dt):
+        return self.prediction.survival_remaining_hours(site, dwell, elapsed, dt)
+
+    def arrival_multipliers(self, observation, steps):
+        return self.prediction.arrival_multipliers(observation, steps)
+
+    def occupancy_multiplier(self, observation, steps):
+        return self.prediction.occupancy_multiplier(observation, steps)
+
     def arrival_rate(self, site, hour, weekday):
         return self.prediction.arrival_rate(site, hour, weekday)
 
@@ -46,18 +58,20 @@ class FiveModuleModel:
                 horizon_steps,
                 self.predict,
                 self.arrival_rate,
-                predict_quantiles_fn=self.predict_quantiles,
-                sample_fn=self.future_sampler,
-                seed=0,
+                future_cohorts_fn=self.future_cohorts,
+                survival_fn=self.survival_remaining_hours,
+                arrival_calibration_fn=self.arrival_multipliers,
+                occupancy_multiplier_fn=self.occupancy_multiplier,
             )
         return forecast_natural(
             observation,
             horizon_steps,
             self.predict,
             self.arrival_rate,
-            predict_quantiles_fn=self.predict_quantiles,
-            sample_fn=self.future_sampler,
-            seed=0,
+            future_cohorts_fn=self.future_cohorts,
+            survival_fn=self.survival_remaining_hours,
+            arrival_calibration_fn=self.arrival_multipliers,
+            occupancy_multiplier_fn=self.occupancy_multiplier,
         )
 
     def explain(self):

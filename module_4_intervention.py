@@ -65,6 +65,10 @@ def forecast_capacity_edf(
     predict_quantiles_fn=None,
     sample_fn=None,
     seed=0,
+    future_cohorts_fn=None,
+    survival_fn=None,
+    arrival_calibration_fn=None,
+    occupancy_multiplier_fn=None,
 ):
     """capacity_edf 反事实推演：同一状态，仅容量条件改为容量内限流。
 
@@ -85,4 +89,8 @@ def forecast_capacity_edf(
         predict_quantiles_fn=predict_quantiles_fn,
         sample_fn=sample_fn,
         seed=seed,
+        future_cohorts_fn=future_cohorts_fn,
+        survival_fn=survival_fn,
+        arrival_calibration_fn=arrival_calibration_fn,
+        occupancy_multiplier_fn=occupancy_multiplier_fn,
     )
