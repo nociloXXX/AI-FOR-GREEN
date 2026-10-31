@@ -103,6 +103,25 @@ def main():
             for r in fail:
                 print("   ", r)
 
+    # 现有 LightGBM L1 office 单站模型组合验证。
+    from module_2_prediction import _fit_booster
+    lgb_d = _fit_booster(x, y_d, 31)
+    lgb_w = _fit_booster(x, y_w, 15)
+    rates = []
+    for day_rows in chosen:
+        day_vehicles = _build_day_vehicles(day_rows)
+        peak = _peak_concurrent_kw(day_vehicles)
+        bg = _background_curve(peak)
+        for cond in ("normal", "capacity_limited", "arrival_burst", "demand_shift"):
+            vehicles = _apply_condition(day_vehicles, cond)
+            def predict_fn(f):
+                xb = _features_base([f.hour], [f.weekday], [f.charger_limit_kw])
+                return Prediction(float(lgb_d.predict(xb)[0]), float(lgb_w.predict(xb)[0]))
+            done, total = simulate(vehicles, "office1", peak, bg, predict_fn)
+            rates.append((cond, day_rows[0]["day"], done / total))
+    print("LightGBM L1 office-only: min", min(r for _, _, r in rates),
+          "fails", [r for r in rates if r[2] < 0.85])
+
 
 if __name__ == "__main__":
     main()

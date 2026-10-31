@@ -66,6 +66,9 @@ def _green_signal(observation, horizon_steps=8):
 # laxity 不超过该步数视为“现在已紧”：立即满充、禁止价格延后。
 _SAFETY_MARGIN_STEPS = 1.0
 
+# 价格延后门槛：只有保守松弛超过该步数才允许延后，给 dwell/demand 误差留缓冲。
+_DEFER_MARGIN_STEPS = 3.0
+
 # dwell 点预测有约 1.6h 误差：被高估时会把车辆误判成“有松弛”而延后、少充。
 # 这里保守地把 dwell 估计缩短（假设车辆可能提前离开），完成率优先。
 DWELL_SAFETY_FACTOR = 0.8
@@ -144,9 +147,7 @@ def act_edf(observation, predict_fn, price_deferral=None):
                 deferrable = False
             else:
                 wanted = base
-                # 只有按保守 dwell（假设可能提前离开）仍有松弛时，才允许延后，
-                # 避免 dwell 点预测高估把车辆误判成“有松弛”而少充。
-                deferrable = laxity_conservative > _SAFETY_MARGIN_STEPS
+                deferrable = laxity_conservative > _DEFER_MARGIN_STEPS
 
         cars.append(
             {
