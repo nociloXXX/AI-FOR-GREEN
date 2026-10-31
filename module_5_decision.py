@@ -66,6 +66,10 @@ def _green_signal(observation, horizon_steps=8):
 # laxity 不超过该步数视为“现在已紧”：立即满充、禁止价格延后。
 _SAFETY_MARGIN_STEPS = 1.0
 
+# dwell 点预测有约 1.6h 误差：被高估时会把车辆误判成“有松弛”而延后、少充。
+# 这里保守地把 dwell 估计缩短（假设车辆可能提前离开），完成率优先。
+DWELL_SAFETY_FACTOR = 0.8
+
 # 价格延后总开关：False 时 act 退化为纯完成率优先的尽快充，便于 A/B。
 PRICE_DEFERRAL_ENABLED = True
 
@@ -94,10 +98,14 @@ def act_edf(observation, predict_fn, price_deferral=None):
             _finite(pred.demand_kwh, 0.0) - _finite(vehicle.delivered_kwh, 0.0),
             0.0,
         )
+        dwell_safe_hours = max(
+            _finite(pred.dwell_hours, dt) * DWELL_SAFETY_FACTOR,
+            dt,
+        )
         steps_left = max(
             1,
             math.ceil(
-                _finite(pred.dwell_hours, dt) / dt
+                dwell_safe_hours / dt
                 - _finite(vehicle.elapsed_steps, 0.0)
             ),
         )
