@@ -22,6 +22,7 @@ from acn_causal.student_api import Prediction
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _SITES = ("caltech", "jpl", "office1")
+_QUANTILE_LEVELS = (0.5, 0.75, 0.9)
 
 
 def _features_base(hour, weekday, pmax):
@@ -216,6 +217,16 @@ class PredictionModule:
                 self.dwell_with[site] = self.dwell_fallback[site]
 
         self.arrival_rates = _build_arrival_rates(training)
+        self.demand_quantiles = {}
+        for site in _SITES:
+            frame = training[site]
+            xb = _features_base(
+                frame.hour, frame.weekday, frame.charger_limit_kw
+            )
+            self.demand_quantiles[site] = {
+                q: _fit_hist_quantile(xb, frame.demand_kwh.to_numpy(), q)
+                for q in _QUANTILE_LEVELS
+            }
         self._cache = {}
 
     @staticmethod
@@ -264,6 +275,22 @@ class PredictionModule:
                 float(np.clip(dwell, 0.25, 24.0)),
             )
         return self._cache[key]
+
+    def predict_quantiles(self, features, levels=(0.5, 0.75, 0.9)):
+        x = _features_base(
+            [features.hour], [features.weekday], [features.charger_limit_kw]
+        )
+        dwell = float(self._model_predict(self.dwell_fallback[features.site], x)[0])
+        models = self.demand_quantiles[features.site]
+        out = {}
+        for q in levels:
+            model = models.get(float(q)) or models[0.5]
+            demand = float(self._model_predict(model, x)[0])
+            out[q] = Prediction(
+                float(np.clip(demand, 0.01, 150.0)),
+                float(np.clip(dwell, 0.25, 24.0)),
+            )
+        return out
 
     def arrival_rate(self, site, hour, weekday):
         table, nbins = self.arrival_rates[site]

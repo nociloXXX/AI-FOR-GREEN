@@ -4,8 +4,8 @@ act 采用最小松弛优先（least-laxity-first）：
 - 每辆在场未完成车计算 laxity = steps_left - time_to_finish，laxity 越小越紧急；
   time_to_finish = remaining_energy / (charger_limit_kw·dt)。
 - 完成基线 = 尽快充（min(桩上限, 剩余需求/dt)），laxity <= safety_margin 的车
-  立即满充；价格延后只作用于 laxity > safety_margin 的正松弛车辆，把它们的
-  功率降到“在预测停留内完成”的必要功率，让位削峰，绝不延后紧车辆。
+  立即满充；价格延后只作用于“保守松弛”（缩短 dwell + 放大 demand）超过
+  defer_margin 的正松弛车辆，把它们的功率降到必要功率，让位削峰，绝不延后紧车辆。
 
 行动限额只来自 capacity_kw 与 forecast_capacity，绝不使用
 intervention_capacity；每辆车不超过其 charger_limit_kw。
