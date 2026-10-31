@@ -1,15 +1,17 @@
 """模块2：预测。
 
-用 LightGBM（L1/MAE 目标）按站点分别训练每辆车的需求电量与停留时长。
-``last_requested_energy_kwh`` 采用双分支：申报值正有限时使用含该特征的模型，
-缺失/非法时退化为不含该特征的回退模型。未来到达的 ArrivalFeatures 该字段为
-None，因此 forecast 推演自然走回退分支，不会把它当作 0 或已知意图。
+预测一辆车到达时的需求电量与停留时长。demand/dwell 各用单目标 LightGBM
+(L1/MAE)，按站点分开训练；`last_requested_energy_kwh` 用双分支：正有限值时
+走含该特征的模型，缺失/非法时走不含该特征的回退模型。未来到达车辆该字段为
+None，因此 forecast 推演自然走回退分支。
 
-沙箱内优先加载 ``weights/`` 下的 LightGBM 文本权重，不重新训练；权重缺失或
-加载失败时退回现场拟合，LightGBM 不可用时再退回 ExtraTrees 基线。
+小样本站点 office1 额外用全站 pooled 模型做标定收缩：
+``pred = alpha*site_model + (1-alpha)*pooled_model``，alpha 在 office1 时间序
+holdout 上离线选出，避免 919 行小样本过拟合。
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -20,31 +22,37 @@ from acn_causal.student_api import Prediction
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _SITES = ("caltech", "jpl", "office1")
+_SITE_INDEX = {"caltech": 0, "jpl": 1, "office1": 2}
 
 
 def _features_base(hour, weekday, pmax):
-    """不含申报需求的特征，用于回退分支。"""
-    hour = np.asarray(hour, dtype=float)
+    """与 module_1_data.make_features 对齐的 7 列基础特征。"""
+    hour = np.asarray(hour, dtype=float) % 24.0
     weekday = np.asarray(weekday, dtype=float)
     pmax = np.asarray(pmax, dtype=float)
     return np.column_stack(
         [
             np.sin(hour * np.pi / 12.0),
             np.cos(hour * np.pi / 12.0),
-            np.sin(weekday * 2.0 * np.pi / 7.0),
-            np.cos(weekday * 2.0 * np.pi / 7.0),
+            np.sin(hour * np.pi / 6.0),
+            np.cos(hour * np.pi / 6.0),
             weekday,
+            (weekday >= 5.0).astype(float),
             pmax,
         ]
     )
 
 
 def _features_with_request(hour, weekday, pmax, requested):
-    """含申报需求的特征，只在 requested 为正有限值时调用。"""
-    requested = np.asarray(requested, dtype=float)
-    return np.column_stack(
-        [_features_base(hour, weekday, pmax), requested.reshape(-1, 1)]
-    )
+    requested = np.asarray(requested, dtype=float).reshape(-1, 1)
+    return np.column_stack([_features_base(hour, weekday, pmax), requested])
+
+
+def _pooled_features(hour, weekday, pmax, site):
+    base = _features_base(hour, weekday, pmax)
+    onehot = np.zeros((len(base), len(_SITES)), dtype=float)
+    onehot[:, _SITE_INDEX[site]] = 1.0
+    return np.column_stack([base, onehot])
 
 
 def _is_valid_request(value):
@@ -55,7 +63,7 @@ def _is_valid_request(value):
     return np.isfinite(value) and value > 0.0
 
 
-def _fit_booster(x, y, num_leaves):
+def _fit_booster(x, y, num_leaves, sample_weight=None):
     import lightgbm as lgb
 
     model = lgb.LGBMRegressor(
@@ -71,12 +79,11 @@ def _fit_booster(x, y, num_leaves):
         n_jobs=1,
         verbose=-1,
     )
-    model.fit(x, y)
+    model.fit(x, y, sample_weight=sample_weight)
     return model.booster_
 
 
 def _fit_extra_trees(x, y):
-    """LightGBM 不可用时保留的 ExtraTrees 基线（单目标）。"""
     from sklearn.ensemble import ExtraTreesRegressor
 
     model = ExtraTreesRegressor(
@@ -98,16 +105,21 @@ def _load_booster(path):
     return lgb.Booster(model_file=str(path))
 
 
+def _load_alpha():
+    path = _WEIGHTS_DIR / "office1_alpha.json"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return float(data["demand"]), float(data["dwell"])
+    except Exception:
+        return 0.5, 0.5
+
+
 def _build_arrival_rates(training):
-    """返回每站点分星期x时段的到达率表，单位：辆/15分钟步。"""
     rates = {}
     for site in _SITES:
         frame = training[site]
-        day = pd.to_datetime(frame.day, errors="coerce").dropna()
-        if day.empty:
-            rates[site] = (np.zeros((7, 24), dtype=float), 24)
-            continue
-        days = pd.date_range(day.min(), day.max(), freq="D")
+        days = pd.date_range(frame.day.min(), frame.day.max(), freq="D")
         weekday_days = np.bincount(days.dayofweek, minlength=7).astype(float)
         total_days = max(float(len(days)), 1.0)
 
@@ -138,7 +150,7 @@ def _build_arrival_rates(training):
 
 
 class PredictionModule:
-    """需求/停留 LightGBM 双分支回归器 + 星期x时段到达率表。"""
+    """需求/停留 LightGBM 双分支回归器 + pooled 收缩 + 到达率表。"""
 
     def __init__(self, training):
         self.demand_with = {}
@@ -148,12 +160,11 @@ class PredictionModule:
 
         for site in _SITES:
             frame = training[site]
-            if "last_requested_energy_kwh" in frame.columns:
-                requested = pd.to_numeric(
-                    frame["last_requested_energy_kwh"], errors="coerce"
-                ).to_numpy(dtype=float)
-            else:
-                requested = np.full(len(frame), np.nan)
+            requested = (
+                np.asarray(frame["last_requested_energy_kwh"], dtype=float)
+                if "last_requested_energy_kwh" in frame.columns
+                else np.full(len(frame), np.nan)
+            )
             valid = np.isfinite(requested) & (requested > 0.0)
             xb = _features_base(
                 frame.hour, frame.weekday, frame.charger_limit_kw
@@ -197,8 +208,28 @@ class PredictionModule:
                 self.demand_with[site] = self.demand_fallback[site]
                 self.dwell_with[site] = self.dwell_fallback[site]
 
+        self.demand_pooled = self._load_or_fit_pooled(
+            _WEIGHTS_DIR / "demand_pooled.txt", training, "demand_kwh", 31
+        )
+        self.dwell_pooled = self._load_or_fit_pooled(
+            _WEIGHTS_DIR / "dwell_pooled.txt", training, "dwell_hours", 15
+        )
+        self.alpha_demand, self.alpha_dwell = _load_alpha()
+
         self.arrival_rates = _build_arrival_rates(training)
         self._cache = {}
+
+    def _load_or_fit_pooled(self, path, training, target, leaves):
+        try:
+            return _load_booster(path)
+        except Exception:
+            pass
+        xs, ys = [], []
+        for site in _SITES:
+            frame = training[site]
+            xs.append(_pooled_features(frame.hour, frame.weekday, frame.charger_limit_kw, site))
+            ys.append(frame[target].to_numpy())
+        return _fit_booster(np.vstack(xs), np.concatenate(ys), leaves)
 
     @staticmethod
     def _model_or_fit(path, x, y, num_leaves):
@@ -206,9 +237,10 @@ class PredictionModule:
             return _load_booster(path)
         except Exception:
             pass
-        # 评测沙箱内不重新训练 LightGBM；权重缺失或加载失败时走轻量 ExtraTrees，
-        # 避免运行时训练导致超时或内存超限。
-        return _fit_extra_trees(x, y)
+        try:
+            return _fit_booster(x, y, num_leaves)
+        except Exception:
+            return _fit_extra_trees(x, y)
 
     @staticmethod
     def _model_predict(model, x):
@@ -227,8 +259,9 @@ class PredictionModule:
             None if not use_request else round(float(requested), 3),
         )
         if key not in self._cache:
-            if len(self._cache) > 20000:
-                self._cache.clear()
+            xb = _features_base(
+                [features.hour], [features.weekday], [features.charger_limit_kw]
+            )
             if use_request:
                 x = _features_with_request(
                     [features.hour], [features.weekday],
@@ -237,11 +270,17 @@ class PredictionModule:
                 demand = float(self._model_predict(self.demand_with[features.site], x)[0])
                 dwell = float(self._model_predict(self.dwell_with[features.site], x)[0])
             else:
-                x = _features_base(
-                    [features.hour], [features.weekday], [features.charger_limit_kw]
-                )
-                demand = float(self._model_predict(self.demand_fallback[features.site], x)[0])
-                dwell = float(self._model_predict(self.dwell_fallback[features.site], x)[0])
+                demand = float(self._model_predict(self.demand_fallback[features.site], xb)[0])
+                dwell = float(self._model_predict(self.dwell_fallback[features.site], xb)[0])
+                if features.site == "office1":
+                    xp = _pooled_features(
+                        [features.hour], [features.weekday],
+                        [features.charger_limit_kw], features.site,
+                    )
+                    pooled_demand = float(self._model_predict(self.demand_pooled, xp)[0])
+                    pooled_dwell = float(self._model_predict(self.dwell_pooled, xp)[0])
+                    demand = self.alpha_demand * demand + (1.0 - self.alpha_demand) * pooled_demand
+                    dwell = self.alpha_dwell * dwell + (1.0 - self.alpha_dwell) * pooled_dwell
             self._cache[key] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),

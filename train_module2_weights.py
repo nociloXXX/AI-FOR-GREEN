@@ -1,11 +1,11 @@
-"""离线训练 module_2_prediction 的 LightGBM 双分支权重。
+"""离线训练 module_2_prediction 的 LightGBM 权重。
 
-每个站点训练两组单目标模型：
+每个站点训练单目标 demand/dwell 模型：
+- fallback：只含 hour/weekday/charger_limit，在申报需求缺失样本上训练；
+- with：含 last_requested_energy_kwh，只在正有限申报值样本上训练。
 
-- fallback：只含 hour/weekday/charger_limit 特征，在申报需求缺失的样本上训练；
-- with：含 last_requested_energy_kwh，只在正有限申报值的样本上训练。
-
-权重存为 LightGBM 文本格式。沙箱内 module_2_prediction.py 只加载，不重新训练。
+另训练全站 pooled 模型（站点 one-hot），并用 office1 的时间序 holdout 选出
+``pred = alpha*site + (1-alpha)*pooled`` 的最优 alpha，写成 office1_alpha.json。
 """
 import json
 from pathlib import Path
@@ -19,25 +19,35 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent
 WEIGHTS_DIR = ROOT / "weights"
 SITES = ("caltech", "jpl", "office1")
+SITE_INDEX = {site: i for i, site in enumerate(SITES)}
+ALPHA_GRID = (0.0, 0.3, 0.5, 0.7, 1.0)
 
 
 def features_base(hour, weekday, pmax):
-    hour = np.asarray(hour, dtype=float)
+    hour = np.asarray(hour, dtype=float) % 24.0
     weekday = np.asarray(weekday, dtype=float)
     pmax = np.asarray(pmax, dtype=float)
     return np.column_stack(
         [
             np.sin(hour * np.pi / 12.0),
             np.cos(hour * np.pi / 12.0),
-            np.sin(weekday * 2.0 * np.pi / 7.0),
-            np.cos(weekday * 2.0 * np.pi / 7.0),
+            np.sin(hour * np.pi / 6.0),
+            np.cos(hour * np.pi / 6.0),
             weekday,
+            (weekday >= 5.0).astype(float),
             pmax,
         ]
     )
 
 
-def fit_booster(x, y, num_leaves):
+def pooled_features(hour, weekday, pmax, site):
+    base = features_base(hour, weekday, pmax)
+    onehot = np.zeros((len(base), len(SITES)), dtype=float)
+    onehot[:, SITE_INDEX[site]] = 1.0
+    return np.column_stack([base, onehot])
+
+
+def fit_booster(x, y, num_leaves, sample_weight=None):
     model = lgb.LGBMRegressor(
         objective="regression_l1",
         n_estimators=500,
@@ -51,7 +61,7 @@ def fit_booster(x, y, num_leaves):
         n_jobs=1,
         verbose=-1,
     )
-    model.fit(x, y)
+    model.fit(x, y, sample_weight=sample_weight)
     return model.booster_
 
 
@@ -65,10 +75,48 @@ def load_training():
     return training
 
 
+def office_split(frame, ratio=0.85):
+    days = sorted(frame.day.unique())
+    cut = days[max(1, int(len(days) * ratio)) - 1]
+    return frame[frame.day <= cut].copy(), frame[frame.day > cut].copy()
+
+
+def select_alpha(office, training, target):
+    office_fit, office_val = office_split(office)
+    site_model = fit_booster(
+        features_base(office_fit.hour, office_fit.weekday, office_fit.charger_limit_kw),
+        office_fit[target],
+        31 if target == "demand_kwh" else 15,
+    )
+
+    xs, ys = [], []
+    for site in SITES:
+        frame = training[site] if site != "office1" else office_fit
+        xs.append(pooled_features(frame.hour, frame.weekday, frame.charger_limit_kw, site))
+        ys.append(frame[target].to_numpy())
+    pooled = fit_booster(
+        np.vstack(xs), np.concatenate(ys), 31 if target == "demand_kwh" else 15
+    )
+
+    xb_val = features_base(office_val.hour, office_val.weekday, office_val.charger_limit_kw)
+    xp_val = pooled_features(office_val.hour, office_val.weekday, office_val.charger_limit_kw, "office1")
+    site_pred = site_model.predict(xb_val)
+    pooled_pred = pooled.predict(xp_val)
+    truth = office_val[target].to_numpy()
+
+    best = None
+    for alpha in ALPHA_GRID:
+        mae = float(np.abs(truth - (alpha * site_pred + (1.0 - alpha) * pooled_pred)).mean())
+        if best is None or mae < best[0]:
+            best = (mae, alpha)
+    return best[1]
+
+
 def main():
     training = load_training()
     WEIGHTS_DIR.mkdir(exist_ok=True)
     started = time.time()
+
     for site in SITES:
         frame = training[site]
         requested = (
@@ -83,7 +131,6 @@ def main():
             fallback_mask = ~valid
         else:
             fallback_mask = np.ones(len(frame), dtype=bool)
-
         fit_booster(
             xb[fallback_mask], frame.demand_kwh.to_numpy()[fallback_mask], 31
         ).save_model(WEIGHTS_DIR / f"demand_fallback_{site}.txt")
@@ -99,7 +146,26 @@ def main():
             fit_booster(
                 xw, frame.dwell_hours.to_numpy()[valid], 15
             ).save_model(WEIGHTS_DIR / f"dwell_with_{site}.txt")
-        print(site, "rows", len(frame), "valid", int(valid.sum()), "saved")
+
+    xs, ys_d, ys_w = [], [], []
+    for site in SITES:
+        frame = training[site]
+        xs.append(pooled_features(frame.hour, frame.weekday, frame.charger_limit_kw, site))
+        ys_d.append(frame.demand_kwh.to_numpy())
+        ys_w.append(frame.dwell_hours.to_numpy())
+    fit_booster(np.vstack(xs), np.concatenate(ys_d), 31).save_model(
+        WEIGHTS_DIR / "demand_pooled.txt"
+    )
+    fit_booster(np.vstack(xs), np.concatenate(ys_w), 15).save_model(
+        WEIGHTS_DIR / "dwell_pooled.txt"
+    )
+
+    alpha_demand = select_alpha(training["office1"], training, "demand_kwh")
+    alpha_dwell = select_alpha(training["office1"], training, "dwell_hours")
+    with open(WEIGHTS_DIR / "office1_alpha.json", "w", encoding="utf-8") as fh:
+        json.dump({"demand": alpha_demand, "dwell": alpha_dwell}, fh)
+
+    print("office1 alpha demand/dwell:", alpha_demand, alpha_dwell)
     print("weights dir:", WEIGHTS_DIR)
     print("fit seconds:", round(time.time() - started, 2))
 

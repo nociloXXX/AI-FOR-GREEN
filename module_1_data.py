@@ -13,8 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
+SITES = ("caltech", "jpl", "office1")
 
-def load_training(data_dir=None, sites=("caltech", "jpl", "office1")):
+
+def load_training(data_dir=None, sites=SITES):
     """本地读取三站训练 JSON，返回 site -> DataFrame 的字典。
 
     评测沙箱不调用本函数（training 已由评测器注入 build_model），这里仅
@@ -120,6 +122,80 @@ def make_features(hour, weekday, pmax):
             pmax,
         ]
     )
+
+
+def cross_site_feature_names():
+    """返回 make_cross_site_features 的列名，训练与预测两端保持一致。"""
+    return [
+        "hour_sin",
+        "hour_cos",
+        "weekday",
+        "charger_limit_kw",
+        "site_caltech",
+        "site_jpl",
+        "site_office1",
+        "hour_x_weekday",
+        "request_missing",
+        "request_kwh",
+    ]
+
+
+def make_cross_site_features(hour, weekday, pmax, site, requested=None):
+    """构造可跨站共享的预测特征底座。
+
+    固定输出 10 列：sin/cos(hour)、weekday、charger_limit_kw、site 三站
+    独热、hour×weekday 交互，以及 last_requested_energy_kwh 的“缺失指示 +
+    有效值”双分支。缺失申报保持 NaN 并置 request_missing=1，既不填 0，
+    也不当作目标；训练与预测调用同一函数以保证列对齐。
+    """
+    hour = np.asarray(hour, dtype=float).reshape(-1)
+    weekday = np.asarray(weekday, dtype=float).reshape(-1)
+    pmax = np.asarray(pmax, dtype=float).reshape(-1)
+    site = np.asarray(site).reshape(-1)
+    if requested is None:
+        requested = np.full_like(hour, np.nan)
+    else:
+        requested = np.asarray(requested, dtype=float).reshape(-1)
+
+    valid_request = np.isfinite(requested) & (requested > 0.0)
+    request_kwh = np.where(valid_request, requested, np.nan)
+    request_missing = (~valid_request).astype(float)
+
+    hour = hour % 24.0
+    site_matrix = np.column_stack(
+        [(site == name).astype(float) for name in SITES]
+    )
+    return np.column_stack(
+        [
+            np.sin(hour * np.pi / 12.0),
+            np.cos(hour * np.pi / 12.0),
+            weekday,
+            pmax,
+            site_matrix,
+            hour * weekday,
+            request_missing,
+            request_kwh,
+        ]
+    )
+
+
+def chronological_split(training, ratio=0.8):
+    """按每个站点的日期做时间序切分，返回 (train, val) 字典，禁止随机打散。"""
+    import pandas as pd
+
+    train, val = {}, {}
+    for site, frame in training.items():
+        frame = clean_training_frame(frame)
+        if len(frame) == 0:
+            train[site] = frame
+            val[site] = frame.iloc[0:0].copy()
+            continue
+        day = pd.to_datetime(frame["day"], errors="coerce")
+        days = sorted(day.dropna().unique())
+        cut = days[max(1, int(len(days) * ratio)) - 1]
+        train[site] = frame[day <= cut].copy()
+        val[site] = frame[day > cut].copy()
+    return train, val
 
 
 def _laplace_hour_rates(counts, days, alpha):

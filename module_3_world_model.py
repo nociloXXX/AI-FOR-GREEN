@@ -40,22 +40,52 @@ def _remaining_steps(pred: Prediction, dt_hours: float, elapsed_steps: int) -> i
     return max(1, steps)
 
 
-def rollout(
+def _poisson_quantile(rate, level):
+    """泊松计数分布的 ``level`` 分位数：P(X <= k) >= level 的最小 k。"""
+    rate = max(_finite(rate), 0.0)
+    level = min(max(_finite(level, default=0.5), 0.0), 1.0)
+    if rate <= 1e-12:
+        return 0
+    # 3 个标准差外几乎无概率，给大 rate 一个确定上界，避免无界循环。
+    upper = int(rate + 10.0 * math.sqrt(rate) + 12)
+    pmf = math.exp(-rate)
+    cdf = pmf
+    k = 0
+    while k < upper:
+        if cdf >= level:
+            return k
+        k += 1
+        pmf *= rate / k
+        cdf += pmf
+    return upper
+
+
+def _arrival_counts(observation, horizon_steps, arrival_rate_fn, quantiles):
+    """按每步公开到达率生成各分位情景下的整数到达数。"""
+    dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
+    horizon = max(0, int(_finite(horizon_steps, default=0.0)))
+    counts = {level: [0] * horizon for level in quantiles}
+    for step in range(horizon):
+        hour = (observation.local_hour + step * dt) % 24.0
+        weekday = (
+            observation.weekday
+            + int((observation.local_hour + step * dt) // 24)
+        ) % 7
+        rate = max(_finite(arrival_rate_fn(observation.site, hour, weekday)), 0.0)
+        for level in quantiles:
+            counts[level][step] = _poisson_quantile(rate, level)
+    return counts
+
+
+def _rollout_with_counts(
     observation,
     horizon_steps,
     predict_fn,
-    arrival_rate_fn,
     capacity_fn,
+    arrival_counts,
     priority_key=None,
 ):
-    """通用前向推演。
-
-    车辆状态用 ``[剩余需求kWh, 剩余停留步数, 桩功率上限kW]`` 表示；每步先
-    按期望到达补入新车，再统计仍在场且未完成的车数，按容量分配功率，最后
-    全体车辆停留步数减一。``capacity_fn(step)`` 返回本步可用充电功率，传
-    ``float("inf")`` 即自然满功率充电。``priority_key`` 省略时按剩余停留
-    步数升序（最早离开优先，EDF）分配，也可传入自定义排序键。
-    """
+    """给定未来每步整数到达数，执行一条确定性物理推演路径。"""
     dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
     horizon = max(0, int(_finite(horizon_steps, default=0.0)))
     cars = []
@@ -82,16 +112,13 @@ def rollout(
 
     loads = []
     active = []
-    acc = 0.0
     for step in range(horizon):
         hour = (observation.local_hour + step * dt) % 24.0
         weekday = (
             observation.weekday
             + int((observation.local_hour + step * dt) // 24)
         ) % 7
-        rate = max(_finite(arrival_rate_fn(observation.site, hour, weekday)), 0.0)
-        acc += rate
-        while acc >= 1.0:
+        for _ in range(int(arrival_counts[step])):
             pred = predict_fn(
                 ArrivalFeatures("forecast", observation.site, hour, weekday, 6.6)
             )
@@ -103,7 +130,6 @@ def rollout(
                     6.6,
                 ]
             )
-            acc -= 1.0
 
         valid = [car for car in cars if car[0] > 1e-8 and car[1] > 0]
         active.append(int(len(valid)))
@@ -121,6 +147,72 @@ def rollout(
     loads = [max(_finite(v), 0.0) for v in loads]
     loads += [0.0] * (horizon - len(loads))
     active += [0] * (horizon - len(active))
+    return {"ev_load_kw": loads, "active_count": active}
+
+
+def rollout(
+    observation,
+    horizon_steps,
+    predict_fn,
+    arrival_rate_fn,
+    capacity_fn,
+    priority_key=None,
+    arrival_quantiles=(0.25, 0.5, 0.75),
+):
+    """通用前向推演。
+
+    车辆状态用 ``[剩余需求kWh, 剩余停留步数, 桩功率上限kW]`` 表示；每步先
+    按公开到达率的分位情景补入新车，再统计仍在场且未完成的车数，按容量分配
+    功率，最后全体车辆停留步数减一。``capacity_fn(step)`` 返回本步可用充电
+    功率，传 ``float("inf")`` 即自然满功率充电。``priority_key`` 省略时按
+    剩余停留步数升序（最早离开优先，EDF）分配。
+
+    ``arrival_quantiles`` 给多个分位时，把各情景轨迹求平均作为稳健单路径；
+    传空元组则退回旧的“期望到达累加器”口径。
+    """
+    if not arrival_quantiles:
+        # 旧口径：累积期望到达，满 1 补一辆。保留给需要严格期望路径的调用方。
+        dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
+        horizon = max(0, int(_finite(horizon_steps, default=0.0)))
+        counts = [0] * horizon
+        acc = 0.0
+        for step in range(horizon):
+            hour = (observation.local_hour + step * dt) % 24.0
+            weekday = (
+                observation.weekday
+                + int((observation.local_hour + step * dt) // 24)
+            ) % 7
+            acc += max(_finite(arrival_rate_fn(observation.site, hour, weekday)), 0.0)
+            while acc >= 1.0:
+                counts[step] += 1
+                acc -= 1.0
+        return _rollout_with_counts(
+            observation, horizon, predict_fn, capacity_fn, counts, priority_key
+        )
+
+    scenario_counts = _arrival_counts(
+        observation, horizon_steps, arrival_rate_fn, arrival_quantiles
+    )
+    scenarios = [
+        _rollout_with_counts(
+            observation,
+            horizon_steps,
+            predict_fn,
+            capacity_fn,
+            scenario_counts[level],
+            priority_key,
+        )
+        for level in arrival_quantiles
+    ]
+    horizon = max(0, int(_finite(horizon_steps, default=0.0)))
+    loads = [
+        sum(scenario["ev_load_kw"][i] for scenario in scenarios) / len(scenarios)
+        for i in range(horizon)
+    ]
+    active = [
+        int(round(sum(scenario["active_count"][i] for scenario in scenarios) / len(scenarios)))
+        for i in range(horizon)
+    ]
     return {"ev_load_kw": loads, "active_count": active}
 
 
