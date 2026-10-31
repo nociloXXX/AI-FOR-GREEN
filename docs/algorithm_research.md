@@ -291,3 +291,53 @@
 | 论文 | 主题 | 与本任务关系 | 合规/一天内结论 |
 | --- | --- | --- | --- |
 | 非理想网络环境下基于分层架构的电动汽车分布式充电调度 | 分布式分层调度 + 非理想网络通信 | 接口是单站点、集中观测、离线本地沙箱，无多代理通信/时延/丢包 | 不相关，不接入任何模块 |
+
+## 9. 当前痛点定向调研（第五轮，针对模块现状）
+
+> 面向当前实现：ExtraTrees demand/dwell + last_requested 分桶双分支、物理 rollout、capacity_edf、slack 分桶 TOPSIS + TOU 感知 EDF。约束：单核 CPU、开发 120s/180s 墙钟/2GiB，禁训 DL。
+
+### 9.1 小样本与跨站迁移（office1 919 行）
+
+- Location-Based Probabilistic Load Forecasting of EV Charging Sites（MQ-TCN，2024）。模型：多分位数时序卷积网络，用 Caltech/JPL 向 Office-1/NREL 做归纳式迁移。解决：数据稀缺站点负荷预测。对应：office1 样本少。是否采用：模型本身不采用（DL/TCN 禁训、超预算）；采用其“跨站预训练 + 目标站微调”的思想，换成 pooled LightGBM/ExtraTrees + 站点特征 + 目标站标定。
+- Probabilistic forecasts of time and energy flexibility in BEV charging（Applied Energy 2020）。模型：分位数回归、MLP tilted loss、条件核密度，预测停车时长与能量需求的各分位点。解决：单点预测给不出不确定性，调度需要分位信息。对应：dwell MAE 高、EDF 优先级需要可靠停留估计。是否采用：是，落地为 sklearn 的 `HistGradientBoostingRegressor(loss="quantile")` 或 `GradientBoostingRegressor(loss="quantile")`，纯 CPU、预装。
+- Machine learning approaches to short-term EV charging demand prediction: applicability and geographical transferability（2026）。结论：站点间可迁移性存在但不稳定，迁移前要先做站点相似度/标定。是否采用：参考，不做重迁移管线。
+
+**落地动作**：`module_2_prediction.py` 用全站 pooled 模型 + `site` 特征作为共享底座，再对 office1 做输出标定（把站点预测向 pooled 中位数收缩，shrinkage = α·site + (1-α)·pooled，α 在验证集上选）。这是最省时的“借力”手段。
+
+### 9.2 到达已知但需求申报缺失/迟到
+
+- ACN-Data 的用户行为建模（NSF 公开摘要，GMM 联合建模 arrival/duration/energy）。模型：高斯混合模型同时刻画到达时刻、停留时长、交付电量的联合分布。解决：到达后无法知道真实需求与离开时间，只能从历史联合分布条件采样。对应：`last_requested_energy_kwh` 常缺失，不能当 0。是否采用：是，sklearn `GaussianMixture` 预装且轻量，用 (site, hour, weekday) 条件化抽样。
+- Time Matters: A Survival Analysis of Public EV Charging Infrastructure Utilization（2026）。模型：Kaplan-Meier/生存分析刻画充电会话时长分布。解决：停留时长右删失、长尾。对应：dwell 预测高误差。是否采用：部分采用，`lifelines` 未预装，可用 numpy 手写 KM 或直接用分位数回归替代；只作诊断，不接在线。
+
+**落地动作**：保留现有 last_requested 分桶双分支；当缺失时用条件分位点/条件经验分布替代单点均值，给 EDF 一个保守（偏短）的停留估计，避免漏充。
+
+### 9.3 轨迹推演中的停留与剩余需求不确定性
+
+- Probabilistic forecasts of time and energy flexibility（2020）：用分位点（deciles）生成多情景，再据此做时移充电。解决：确定性轨迹忽略不确定性。对应：`module_3_world_model.py` 的 rollout 目前是单点未来到达。是否采用：是，但要省 CPU：未来到达用 1-3 个分位情景（p10/p50/p90）或从条件经验分布抽 1 条路径，不做大批量蒙特卡洛。
+- ACN-Data GMM 联合建模：未来到达的 demand/dwell 从条件 GMM 抽样。是否采用：可作 9.2 的 GMM 复用。
+
+**落地动作**：`module_3_world_model.py` 在注入未来车辆时，用 `predict` 的分位输出或条件经验分布抽 dwell/demand，而不是固定点值；保持 natural 与 capacity_edf 同一套采样。
+
+### 9.4 容量受限下 EDF 与价格感知如何兼顾完成率
+
+- Liu 1973 调度 + Constrained/Smoothed Least Laxity First（LAPSE 2023）。模型：最小松弛优先，laxity = 剩余时间 - 满功率完成所需时间。解决：EDF 只看截止，LLF 同时看剩余需求与剩余时间，容量受限下完成率更好。对应：`module_5_decision.py` 的 act。是否采用：是，直接把优先级从“剩余停留步数”改成“laxity = remaining_steps - remaining_energy/(charger_limit·dt)”，一行级改动，完成率提升最直接。
+- Optimizing EV charging schedules based on probabilistic forecast of individual mobility（2022）。模型：分位预测 + 时移智能充电。解决：在保证完成下把充电移到低价段。对应：当前 TOU 感知 EDF。是否采用：是，保持“先 LLF 保完成，再在松弛为正的车里做价格延后”。
+- Adaptive Charging Networks（Lee et al. 2021）：MPC + 凸优化在线调度，EDF/LLF 为基线。是否采用：参考，作为 explain 里的对照。
+
+**落地动作**：`module_5_decision.py` 的排序键改为 LLF（laxity），价格延后只作用于 laxity 为正且需求小的车；改完用 `public_self_eval.py` 看三站完成率是否守住 Caltech 0.85/JPL 0.65/Office 0.85。
+
+### 9.5 一天内可落地的轻量清单（按投入排序）
+
+1. LLF 替换 EDF 排序键（P0，几分钟）：最直接提完成率，尤其 Office。
+2. 全站 pooled + 站点标定收缩，治 office1 小样本（P0）。
+3. demand/dwell 分位数回归（sklearn quantile GBM），替代/补充单点 ExtraTrees（P1）。
+4. 未来到达注入改用条件分位情景（P1）。
+5. GMM 联合建模做需求/停留条件抽样（P2，有富余时间再做）。
+6. 生存分析/KM 仅作离线诊断（P2）。
+
+## 10. 给模块会话的第五轮派发
+
+- module_2_prediction：pooled 底座 + office1 标定收缩；demand/dwell 加分位输出。
+- module_3_world_model：未来到达按条件分位/经验分布注入，natural 与 capacity_edf 同采样。
+- module_5_decision：优先级改 LLF（laxity），价格延后只作用于正松弛车辆，并回归三站完成率。
+- module_1_data / module_4_intervention：本轮无新增。
