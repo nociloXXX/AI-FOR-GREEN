@@ -147,6 +147,8 @@ class PredictionModule:
 
     def predict(self, features):
         requested = getattr(features, "last_requested_energy_kwh", None)
+        if requested is not None and not np.isfinite(float(requested)):
+            requested = None
         key = (
             features.site,
             round(float(features.hour), 4),
