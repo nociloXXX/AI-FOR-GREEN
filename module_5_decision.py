@@ -1,14 +1,12 @@
 """模块5：充电决策。
 
-act 采用最小松弛优先（least-laxity-first）：
-- 每辆在场未完成车计算 laxity = steps_left - time_to_finish，laxity 越小越紧急；
-  time_to_finish = remaining_energy / (charger_limit_kw·dt)。
-- 完成基线 = 尽快充（min(桩上限, 剩余需求/dt)），laxity <= safety_margin 的车
-  立即满充；价格延后只作用于“保守松弛”（缩短 dwell + 放大 demand）超过
-  defer_margin 的正松弛车辆，把它们的功率降到必要功率，让位削峰，绝不延后紧车辆。
+act 采用“未完成即满充 + 最小松弛优先（LLF）削减”：
+- 任何 charging_complete=False 的车一律申请满功率 charger_limit_kw；
+- 预测误差只影响排序（laxity），不再限制单辆功率上限；
+- 站点容量不够时按 LLF 削减，laxity 越小越优先。
 
-行动限额只来自 capacity_kw 与 forecast_capacity，绝不使用
-intervention_capacity；每辆车不超过其 charger_limit_kw。
+行动限额只来自 capacity_kw 与 forecast_capacity 的当前值，扣除背景负荷；
+不使用 intervention_capacity。
 """
 from __future__ import annotations
 
@@ -27,7 +25,7 @@ def _finite(value, default=0.0):
 def _ev_capacity_kw(observation):
     """当前步可用的电动车功率（kW）。
 
-    行动限额是 capacity_kw 与 forecast_capacity 当前值的最小者，再扣除背景
+    行动限额取 capacity_kw 与 forecast_capacity 当前值的最小者，再扣除背景
     负荷。intervention_capacity 是公开反事实容量，不能当行动限额。
     """
     capacity = _finite(observation.capacity_kw, 0.0)
@@ -38,76 +36,15 @@ def _ev_capacity_kw(observation):
     return max(capacity - background, 0.0)
 
 
-def _green_signal(observation, horizon_steps=None):
-    """返回 (当前是否便宜, 未来近期容量是否比现在更紧)。
-
-    容量前瞻 MPC：若未来 horizon 步内 forecast_capacity - forecast_background
-    的最小值低于当前可用容量，说明近期会被容量卡住，返回 tight_ahead=True，
-    让决策提前充；分配顺序始终是 LLF，因此前瞻不可行时自然回退到 LLF。
-    """
-    prices = getattr(observation, "prices", ()) or ()
-    if prices:
-        future = [float(p) for p in prices[1:]]
-        cheap = not future or float(prices[0]) <= min(future)
-    else:
-        cheap = True
-
-    current_ev = _ev_capacity_kw(observation)
-    fc = getattr(observation, "forecast_capacity", ()) or ()
-    fb = getattr(observation, "forecast_background", ()) or ()
-    tight_ahead = False
-    if fc:
-        horizon = min(
-            len(fc) - 1,
-            max(1, int(horizon_steps if horizon_steps is not None else MPC_HORIZON_STEPS)),
-        )
-        headrooms = []
-        for i in range(1, horizon + 1):
-            cap = _finite(fc[i], current_ev)
-            bg = _finite(fb[i], 0.0) if i < len(fb) else 0.0
-            headrooms.append(max(cap - bg, 0.0))
-        if headrooms:
-            tight_ahead = min(headrooms) < current_ev
-    return cheap, tight_ahead
-
-
-# laxity 不超过该步数视为“现在已紧”：立即满充、禁止价格延后。
-_SAFETY_MARGIN_STEPS = 1.0
-
-# 容量前瞻 MPC 的前瞻步数：看未来这几步的 forecast_capacity 是否比现在更紧。
-MPC_HORIZON_STEPS = 8
-
-# 价格延后门槛：只有保守松弛超过该步数才允许延后，给 dwell/demand 误差留缓冲。
-_DEFER_MARGIN_STEPS = 3.0
-
-# dwell 点预测有约 1.6h 误差：被高估时会把车辆误判成“有松弛”而延后、少充。
-# 这里保守地把 dwell 估计缩短（假设车辆可能提前离开），完成率优先。
-DWELL_SAFETY_FACTOR = 0.8
-
-# demand 点预测在 office1 等小样本站可能明显低估：保守放大剩余需求，
-# 让“必要功率”与延后资格按更保守的口径计算，避免过早停止或过度延后。
-DEMAND_SAFETY_FACTOR = 1.5
-
-# 价格延后总开关：False 时 act 退化为纯完成率优先的尽快充，便于 A/B。
-# 官方评测曾因价格延后把完成率拉低到 DQ，先默认关闭保资格。
-PRICE_DEFERRAL_ENABLED = False
-
-
 def act_edf(observation, predict_fn, price_deferral=None, dwell_fn=None):
-    """返回 {token: 请求功率 kW}，只操作当前连接且未完成的车辆。
+    """返回 {token: 请求功率 kW}。
 
-    ``dwell_fn`` 是预留的保守停留接入点：module_2 落地 q 分位后，submission
-    传入 ``dwell_fn(ArrivalFeatures)->float``（返回保守的停留小时数）即可替换
-    点估计；未传入时使用 ``predict_fn`` 返回的 ``dwell_hours``。
+    未完成车辆一律请求满功率，容量不足时按 LLF 削减。``price_deferral`` 与
+    ``dwell_fn`` 参数仅为接口兼容保留，当前不使用。
     """
     dt = _finite(observation.dt_hours, 0.25)
     if dt <= 0:
         dt = 0.25
-
-    cheap, tight_ahead = _green_signal(observation)
-    defer_enabled = (
-        PRICE_DEFERRAL_ENABLED if price_deferral is None else bool(price_deferral)
-    )
 
     cars = []
     for vehicle in observation.vehicles:
@@ -123,60 +60,21 @@ def act_edf(observation, predict_fn, price_deferral=None, dwell_fn=None):
             0.0,
         )
         dwell_hours = _finite(pred.dwell_hours, dt)
-        if dwell_fn is not None:
-            dwell_hours = _finite(dwell_fn(vehicle.features), dwell_hours)
         steps_left = max(
             1,
             math.ceil(
-                dwell_hours / dt
-                - _finite(vehicle.elapsed_steps, 0.0)
+                dwell_hours / dt - _finite(vehicle.elapsed_steps, 0.0)
             ),
         )
-        dwell_conservative = max(dwell_hours * DWELL_SAFETY_FACTOR, dt)
-        steps_left_conservative = max(
-            1,
-            math.ceil(
-                dwell_conservative / dt
-                - _finite(vehicle.elapsed_steps, 0.0)
-            ),
-        )
-
-        # 预测说快充完但车辆仍未完成：保持桩上限推进，发现真实剩余需求。
-        discover = remaining < 0.05
-        if discover:
-            laxity = 0.0
-            wanted = limit
-            base = limit
-            deferrable = False
-        else:
-            remaining_conservative = remaining * DEMAND_SAFETY_FACTOR
-            time_to_finish = remaining / (limit * dt)
-            time_to_finish_conservative = remaining_conservative / (limit * dt)
-            laxity = steps_left - time_to_finish
-            laxity_conservative = (
-                steps_left_conservative - time_to_finish_conservative
-            )
-            necessary = min(
-                limit, remaining_conservative / (steps_left_conservative * dt)
-            )
-            base = min(limit, remaining / dt)
-            if laxity <= _SAFETY_MARGIN_STEPS:
-                # 现在已紧：立即满充，不参与价格延后。
-                wanted = limit
-                deferrable = False
-            else:
-                wanted = base
-                deferrable = laxity_conservative > _DEFER_MARGIN_STEPS
+        time_to_finish = remaining / (limit * dt)
+        laxity = steps_left - time_to_finish
 
         cars.append(
             {
                 "token": vehicle.features.token,
                 "laxity": laxity,
-                "wanted": wanted,
-                "base": base,
-                "necessary": necessary if not discover else limit,
-                "deferrable": deferrable,
                 "steps_left": steps_left,
+                "limit": limit,
             }
         )
 
@@ -184,23 +82,10 @@ def act_edf(observation, predict_fn, price_deferral=None, dwell_fn=None):
         return {}
 
     capacity = _ev_capacity_kw(observation)
-    # 全局“现在已紧”硬条件：当前可用容量不足以让所有未完成车辆按自然满充
-    # 功率充电时，整个步禁用价格延后，避免把本就不足的容量留成浪费。
-    natural_demand = sum(car["base"] for car in cars)
-    now_tight = natural_demand > capacity
-
-    # 第二阶段（价格延后，可开关）：只把正松弛车辆从完成基线降到必要功率；
-    # 高价且未来容量富余的步不前冲，让位削峰。绝不延后 laxity <= margin 的车。
-    if defer_enabled:
-        for car in cars:
-            if car["deferrable"] and not (cheap or tight_ahead or now_tight):
-                car["wanted"] = car["necessary"]
-
-    # LLF 分配：laxity 小者优先，每辆最多给 wanted，直到可用容量用完。
     order = sorted(cars, key=lambda car: (car["laxity"], car["steps_left"]))
     power = {}
     for car in order:
-        granted = min(car["wanted"], capacity)
+        granted = min(car["limit"], capacity)
         power[car["token"]] = granted
         capacity -= granted
     return power
