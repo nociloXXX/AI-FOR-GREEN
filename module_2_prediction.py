@@ -180,6 +180,7 @@ class PredictionModule:
         self.dwell_with = {}
         self.demand_fallback = {}
         self.dwell_fallback = {}
+        self.with_available = {}
 
         for site in _SITES:
             frame = training[site]
@@ -230,6 +231,7 @@ class PredictionModule:
             else:
                 self.demand_with[site] = self.demand_fallback[site]
                 self.dwell_with[site] = self.dwell_fallback[site]
+            self.with_available[site] = bool(valid.any())
 
         self.demand_pooled = self._load_or_fit_pooled(
             _WEIGHTS_DIR / "demand_pooled.txt", training, "demand_kwh", 31
@@ -296,7 +298,7 @@ class PredictionModule:
             xb = _features_base(
                 [features.hour], [features.weekday], [features.charger_limit_kw]
             )
-            if use_request:
+            if use_request and self.with_available.get(features.site, False):
                 x = _features_with_request(
                     [features.hour], [features.weekday],
                     [features.charger_limit_kw], [float(requested)],
