@@ -461,3 +461,16 @@
 > **module_5 → module_2 对接提醒（q 分位方向）**：LLF 的“保守 deadline”对应更短停留，即下分位（q10/q25 这类），不是 q90。q90 是停留上分位（更长），会让 `steps_left`/slack 变大、车辆更容易被误判成“有松弛”而价格延后，反而可能把 office1 完成率打回 0.85 以下。`module_5_decision.act_edf` 已预留 `dwell_fn` 钩子，并用 `DWELL_SAFETY_FACTOR=0.8` 做过渡；module_2 落地分位后按“短停留=保守”的口径提供，接好后必须重跑 `completion_proxy.py --predict both --days 4`，确认 defer 开/关不回退再启用。
 
 护栏：每完成 1 项就跑 completion_proxy 与 offline_intervention_eval，任一闸门回退即停止后续派发。
+
+## 18. P2 方案（富余时间，不破坏完成率闸门）
+
+> 现状：P1 已收口，分位数 q10/q25/q50/q75/q90 落地、KM 离线诊断落地、未来到达分位注入验证通过、effect_skill=1.0 且同采样、completion_proxy 真实预测 PASS、需求 MAE 4.0056 / 停留 1.5737。以下按风险从低到高排序。
+
+| 顺序 | P2 项 | 落地方式 | 模块/文件 | 风险与护栏 |
+| --- | --- | --- | --- | --- |
+| 1 | ACN-Sim 线下复现 EDF 基线与逐车完成率 | 仅线下，禁止进提交包 | 线下工具，不落 `submission.py` | 属数据集发布方配套生态，零在线风险 |
+| 2 | Similar Sessions 余弦近邻（office1 基线） | 可落代码，先离线对比 | `module_2_prediction.py` + `module_1_data.py` | 只在 MAE 优于现状且 completion_proxy 不回退时替换 |
+| 3 | GMM 联合建模（未来到达条件抽样） | 可落代码，经验分位不足时再上 | `module_3_world_model.py` | 只用对角协方差；natural 与 capacity_edf 同采样，重跑 effect_skill + completion_proxy |
+| 4 | 离线完美信息基准（Lee 2021 离线最优） | 只线下/只看不接，写进 explain | `explain.json`、离线报告 | 需未来真值，绝不接在线路径 |
+
+总原则：任何落代码的 P2 项必须“离线对比胜出 → 再接在线 → 重跑 completion_proxy + offline_intervention_eval”；ACN-Sim 与离线完美信息基准永远不进提交包、不进在线路径。

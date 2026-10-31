@@ -23,6 +23,7 @@ from acn_causal.student_api import Prediction
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _SITES = ("caltech", "jpl", "office1")
 _QUANTILE_LEVELS = (0.5, 0.75, 0.9)
+_DWELL_QUANTILE_LEVELS = (0.1, 0.25, 0.5, 0.75, 0.9)
 
 
 def _features_base(hour, weekday, pmax):
@@ -242,7 +243,7 @@ class PredictionModule:
             }
             self.dwell_quantiles[site] = {
                 q: _fit_hist_quantile(xb, frame.dwell_hours.to_numpy(), q, log_target=True)
-                for q in _QUANTILE_LEVELS
+                for q in _DWELL_QUANTILE_LEVELS
             }
             self.emp_demand_q[site] = {
                 q: float(np.quantile(frame.demand_kwh.to_numpy(), q))
@@ -393,12 +394,14 @@ def _build_future_sampler(training):
         emp_dwell_q[site] = {
             q: float(np.quantile(values[:, 1], q)) for q in _QUANTILE_LEVELS
         }
-        if len(values) >= 300:
+        # 数据足才上 GMM：只用 2-3 个组件和对角协方差，避免小样本过拟合。
+        if len(values) >= 400:
             try:
                 from sklearn.mixture import GaussianMixture
 
+                n_components = 3 if len(values) >= 900 else 2
                 gmm = GaussianMixture(
-                    n_components=min(6, len(values) // 120),
+                    n_components=n_components,
                     covariance_type="diag",
                     reg_covar=1e-3,
                     random_state=20261008,
