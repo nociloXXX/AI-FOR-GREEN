@@ -1,0 +1,15 @@
+{
+  "method": "five-module online model: LightGBM dual-branch demand/dwell (with/without last requested) for caltech/jpl, HistGradientBoosting median plus KNN blending for office1, weekday-hour arrivals, physics rollout world model, capacity_edf counterfactual, least-laxity-first + TOU price-aware charging decision",
+  "assumptions": [
+    "charger limit is known at arrival",
+    "demand and dwell are unchanged by the capacity intervention",
+    "future arrivals are modeled from public history, not known in advance",
+    "price-aware deferral only applies when a vehicle still has spare dwell slack, so completion outranks cost",
+    "least-laxity-first protects at-risk vehicles; price deferral only applies to vehicles with positive laxity"
+  ],
+  "limitations": [
+    "arrival features cannot capture all driver intent",
+    "rollout does not model battery taper",
+    "counterfactual response is model-internal physics, not real behavioral causal evidence"
+  ]
+}

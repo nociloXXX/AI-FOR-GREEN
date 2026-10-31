@@ -1,0 +1,26 @@
+{
+  "route": "ml",
+  "contract_version": "last-request-snapshot-1",
+  "environment_id": "cpu-ml-methods-v3",
+  "seed": 20261008,
+  "files": {
+    "README.md": "7b2dada73754a021b7b5efeefde093ef44f37572366e5e803b7c1f88a61145f9",
+    "explain.json": "ca2a93f8d8048d0d36ac18ae2dfa55a62b8c88388d5737aed4a3d81cc5e03e15",
+    "submission.py": "9a2cf37f5e3c1627409dab6dde93e7db30f6343be7e53c6b2e9faa5df79df75e",
+    "module_1_data.py": "789536114978ddd507339b5a88f52310b0a9af4b356d72471d20393885305149",
+    "module_2_prediction.py": "7f713476d455631f03b60346ae868e2f5ab19893686ce18dd1ac0d97b3a62a4c",
+    "module_3_world_model.py": "87bd098b3ef4e7520d6ef14738644710cad5ae8346dc4c96804f534ec640a4d1",
+    "module_4_intervention.py": "6e62b845ca9c65c69a669bbfe5667a06dc1e07f6748a82fc69d26b3ba2f114f5",
+    "module_5_decision.py": "36cba2c198b4fae719cda7c1ca83fae48320fb7015d424af70d433b612c579f7",
+    "acn_causal/student_api.py": "1a9fd0625a00bdbc36a42e58e80819ee092d9ca5356a54cfd7d46edef352f00b",
+    "weights/demand_fallback_caltech.txt": "b16fd45003b7edcd20f6dd5a7d5f0b6b74219381a9fa0ebfdeebf2052ea45d33",
+    "weights/demand_fallback_jpl.txt": "212b593a306c651aff294e915cc37befb6ab626030f8a2dd2853af5ba84fe080",
+    "weights/demand_with_caltech.txt": "5018e1c2aa4c48497acab1fc238f6ffe6d409ff3b03ce20bfcf1036d3dc39242",
+    "weights/demand_with_jpl.txt": "686755aa7867c2a1ed5d706e36c546c3bba8b82b3d020bdf01d3c9e9d71dbb5d",
+    "weights/dwell_fallback_caltech.txt": "41002eea4c1b01ecfe23a2c230c58e14a24f23e0ba63baaa7b2c72e7dca107e2",
+    "weights/dwell_fallback_jpl.txt": "1ec6a961b566fa2d428fd6f877048d9a980d055a1a704df709104d802df94831",
+    "weights/dwell_with_caltech.txt": "7c5ff98fcbf13929474091ee6256ed787a0fc829d3f87c2caac35c18ab47c3db",
+    "weights/dwell_with_jpl.txt": "54773721b690b9b79502f295e2b274ceb6d1906c327bf973e6f68f107c96478e",
+    "weights/site_profiles.npz": "8f84045c75786d74af018f7ebd9775eddf3f0dd503e216d46993c26e47e11e65"
+  }
+}
