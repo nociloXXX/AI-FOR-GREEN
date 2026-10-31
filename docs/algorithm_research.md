@@ -474,3 +474,23 @@
 | 4 | 离线完美信息基准（Lee 2021 离线最优） | 只线下/只看不接，写进 explain | `explain.json`、离线报告 | 需未来真值，绝不接在线路径 |
 
 总原则：任何落代码的 P2 项必须“离线对比胜出 → 再接在线 → 重跑 completion_proxy + offline_intervention_eval”；ACN-Sim 与离线完美信息基准永远不进提交包、不进在线路径。
+
+### 18.1 Similar Sessions 实测回执（module_2 → C 对齐）
+
+实测结论：office1 用“单站余弦近邻（加权中位数）+ HistGB q50”做 α=0.5 集成，严格 holdout demand MAE 从 9.015 降到 8.87；completion_proxy PASS，verify_submission 五接口跑通。
+
+修正：跨站混池（caltech+jpl+office1 直接混 kWh）反而变差（MAE 9.24），原因是三站 demand 量级差大。**Similar Sessions 先只在站点内做**；跨站只在“按站点中位数归一化 target 后再近邻”或“站点相似度门控”通过时才启用，作为后续 P2 可选实验，不在当前落地。
+
+护栏：近邻池只取训练切片，不含未来样本；任何改动仍走“严格时间序 holdout → completion_proxy 不回退”的验收。
+
+## 19. 预测侧论文批量审查（第五批）
+
+| 论文 | 主题 | 预测相关性 | 合规/一天内结论 |
+| --- | --- | --- | --- |
+| Arias 2021 Adaptive Robust LP for EV Fleets | 自适应鲁棒 LP 车队调度 | 非预测，属调度侧 | 不接预测；鲁棒不确定性集若要做属 `module_5` 的 P2+ |
+| Jeong & Ghaddar Adaptive Robust EV Routing | 自适应鲁棒路径 | 路径规划，不相关 | 不接入 |
+| Das 2020 G2V/V2G Charging Scheduling | G2V/V2G 调度 | 非预测，且 V2G 不在接口 | 不接入 |
+| Al-Ogaili 2019 Review on Scheduling, Clustering, and Forecasting | 调度/聚类/预测综述 | 预测+聚类最相关 | 参考即可：佐证“聚类/相似会话 + 预测”方向，不落码 |
+| Habib 2021 Review of EV Energy Storage and Management | 储能与能量管理综述 | 预测帮助小 | 不接入 |
+
+结论：本批无新增预测优化。唯一预测相关的 Al-Ogaili 2019 综述支持当前“相似会话/聚类 + GBM 分位”的做法；鲁棒 LP 类只属于 `module_5` 调度增强，且复杂度高，不进入当前轮次。
