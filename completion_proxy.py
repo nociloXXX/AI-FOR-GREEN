@@ -32,8 +32,6 @@ SITES = ("caltech", "jpl", "office1")
 THRESHOLDS = {"caltech": 0.85, "jpl": 0.65, "office1": 0.85}
 DT = 15 / 60.0
 STEPS = 96
-CAPACITY_MULT = {"normal": 1.0, "capacity_limited": 0.4, "arrival_burst": 1.0, "demand_shift": 1.0}
-
 # 官方统一分时电价（USD/kWh），15 分钟一步。
 TOU_PRICES = tuple(
     [0.6] * 24 + [0.9] * 8 + [1.2] * 16 + [0.8] * 8 + [1.1] * 16 + [1.5] * 16 + [0.7] * 8
@@ -57,13 +55,44 @@ def _finite(value, default=0.0):
 
 
 def _background_curve(base_peak_kw, steps=STEPS):
-    """合成一条站级日负荷曲线，峰值约为 base_peak_kw 的 20%，夜间较低。"""
+    """合成一条站级日负荷曲线：早晚双峰，幅值约为 base_peak_kw 的 15%。"""
     curve = []
     for step in range(steps):
         hour = (step * DT) % 24.0
-        shape = max(0.0, math.sin(math.pi * (hour - 7.0) / 12.0))
-        curve.append(base_peak_kw * 0.20 * shape)
+        morning = math.exp(-((hour - 9.5) ** 2) / (2 * 1.8 ** 2))
+        evening = math.exp(-((hour - 19.5) ** 2) / (2 * 2.2 ** 2))
+        shape = 0.55 * morning + 0.75 * evening + 0.12
+        curve.append(base_peak_kw * 0.15 * shape)
     return tuple(curve)
+
+
+def _alap_lower_bound(vehicles, dt=DT, steps=STEPS):
+    """全信息离线调度下，所有目标可完成的物理容量下界。
+
+    每辆车在自身服务窗口内越晚充越好（ALAP），把电量尽量压到窗口末尾，
+    得到各步并发功率，峰值即为“最少需要多大容量才能让全部车完成”。这是
+    capacity_limited 场景的标定容量，不是固定 0.4x。
+    """
+    power = [0.0] * steps
+    for veh in vehicles:
+        limit = max(veh["limit"], 1e-9)
+        window_kwh = limit * (veh["depart"] - veh["arrive"]) * dt
+        energy = min(veh["target"], window_kwh)
+        if energy <= 1e-9:
+            continue
+        per_step = limit * dt
+        full_steps = int(energy // per_step)
+        remainder = energy - full_steps * per_step
+
+        pos = veh["depart"] - 1
+        for _ in range(full_steps):
+            if pos < veh["arrive"]:
+                break
+            power[pos] += limit
+            pos -= 1
+        if remainder > 1e-9 and pos >= veh["arrive"]:
+            power[pos] += remainder / dt
+    return max(power) if power else 0.0
 
 
 def _build_day_vehicles(rows, dt=DT, steps=STEPS):
@@ -225,7 +254,10 @@ def _real_predict(training):
 
 def _run_condition(site, condition, day_vehicles, base_peak, real_predict):
     vehicles = _apply_condition(day_vehicles, condition)
-    ev_capacity = base_peak * CAPACITY_MULT[condition]
+    if condition == "capacity_limited":
+        ev_capacity = _alap_lower_bound(vehicles)
+    else:
+        ev_capacity = base_peak
     background = _background_curve(base_peak)
 
     predict_fns = {"perfect": _perfect_predict(vehicles)}
