@@ -63,9 +63,11 @@ class FiveModuleModel:
     def explain(self):
         return {
             "method": (
-                "five-module online model: data features -> ExtraTrees demand/dwell "
-                "+ weekday-hour arrivals -> physics world model -> counterfactual "
-                "capacity rollout -> least-laxity-first + TOU price-aware charging decision"
+                "five-module online model: LightGBM dual-branch demand/dwell "
+                "(with/without last requested) for caltech/jpl, HistGradientBoosting "
+                "median plus KNN blending for office1, weekday-hour arrivals, physics "
+                "rollout world model, capacity_edf counterfactual, least-laxity-first "
+                "+ TOU price-aware charging decision"
             ),
             "assumptions": [
                 "charger limit is known at arrival",
