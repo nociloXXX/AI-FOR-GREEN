@@ -45,11 +45,56 @@ def load_training(data_dir=None, sites=("caltech", "jpl", "office1")):
         # 固定 6.6 kW 桩是公开参数，缺失时按该值补齐。
         if "charger_limit_kw" in frame.columns:
             frame["charger_limit_kw"] = frame["charger_limit_kw"].fillna(6.6)
-        frame = frame.dropna(
-            subset=["day", "hour", "weekday", "demand_kwh", "dwell_hours"]
-        ).reset_index(drop=True)
-        training[site] = frame.sort_values(["day", "hour"]).reset_index(drop=True)
+        training[site] = clean_training_frame(frame)
     return training
+
+
+def clean_training_frame(frame):
+    """清洗单站训练表，只删行、不改标签值、不改变原行顺序。
+
+    一行是一次充电连接。按 ACN-Data 的会话分析口径做物理域校验：
+    ``hour`` 在 0-24、``weekday`` 为 0-6 的整数、``charger_limit_kw``
+    为正、``demand_kwh`` 非负、``dwell_hours`` 为正；不合法的整行剔除。
+    ``last_requested_energy_kwh`` 缺失保持 NaN，只保留正有限值，不填 0，
+    也不用 ``demand_kwh`` 反推填补。
+    """
+    import pandas as pd
+
+    if frame is None:
+        return pd.DataFrame()
+    df = frame.copy()
+    required = ["hour", "weekday", "charger_limit_kw", "demand_kwh", "dwell_hours"]
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise ValueError(f"训练表缺少字段: {missing}")
+
+    hour = pd.to_numeric(df["hour"], errors="coerce")
+    weekday = pd.to_numeric(df["weekday"], errors="coerce")
+    charger = pd.to_numeric(df["charger_limit_kw"], errors="coerce")
+    demand = pd.to_numeric(df["demand_kwh"], errors="coerce")
+    dwell = pd.to_numeric(df["dwell_hours"], errors="coerce")
+
+    valid = (
+        hour.notna()
+        & hour.between(0.0, 24.0)
+        & weekday.notna()
+        & (weekday >= 0.0)
+        & (weekday <= 6.0)
+        & (weekday == weekday.round())
+        & charger.notna()
+        & (charger > 0.0)
+        & demand.notna()
+        & (demand >= 0.0)
+        & dwell.notna()
+        & (dwell > 0.0)
+    )
+    df = df.loc[valid].reset_index(drop=True)
+
+    if "last_requested_energy_kwh" in df.columns:
+        requested = pd.to_numeric(df["last_requested_energy_kwh"], errors="coerce")
+        keep = np.isfinite(requested) & (requested > 0.0)
+        df["last_requested_energy_kwh"] = requested.where(keep)
+    return df
 
 
 def make_features(hour, weekday, pmax):
@@ -113,7 +158,8 @@ def summarize_site(training):
     """返回每个站点的需求/停留中位数标签。"""
     labels = {}
     for site, frame in training.items():
-        if frame is None or len(frame) == 0:
+        frame = clean_training_frame(frame)
+        if len(frame) == 0:
             continue
         labels[site] = (
             float(frame.demand_kwh.median()),
@@ -134,7 +180,8 @@ def build_weekday_hour_rates(
     """
     hour_rates = {}
     for site, frame in training.items():
-        if frame is None or len(frame) == 0:
+        frame = clean_training_frame(frame)
+        if len(frame) == 0:
             hour_rates[site] = np.zeros((7, 24), dtype=float)
             continue
 

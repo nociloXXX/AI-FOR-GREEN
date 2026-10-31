@@ -42,6 +42,12 @@ def split_train_holdout(training_path):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     from acn_causal.student_api import ArrivalFeatures, Observation, VehicleObservation
     from submission import build_model
 

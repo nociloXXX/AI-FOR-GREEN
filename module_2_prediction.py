@@ -28,7 +28,10 @@ def _make_features(hour, weekday, pmax, requested):
     weekday = np.asarray(weekday, dtype=float)
     pmax = np.asarray(pmax, dtype=float)
     requested = np.asarray(requested, dtype=float)
-    missing = np.isnan(requested).astype(float)
+    # 只有正有限申报值才是有效信号；NaN/Inf/非正都按缺失处理，不填 0。
+    valid = np.isfinite(requested) & (requested > 0.0)
+    missing = (~valid).astype(float)
+    requested = np.where(valid, requested, np.nan)
     return np.column_stack(
         [
             np.sin(hour * np.pi / 12.0),
@@ -74,7 +77,7 @@ def _fit_extra_trees(x, y):
         n_jobs=1,
         random_state=20261008,
     )
-    model.fit(np.nan_to_num(x, nan=0.0), y)
+    model.fit(np.nan_to_num(x, nan=-1.0), y)
     return model
 
 
@@ -166,10 +169,10 @@ class PredictionModule:
 
     @staticmethod
     def _model_predict(model, x):
-        # LightGBM Booster 原生处理 NaN；ExtraTrees 需要把 NaN 置 0。
+        # LightGBM Booster 原生处理 NaN；ExtraTrees 用 -1 占位并用 is_missing 区分。
         if hasattr(model, "num_feature"):
             return model.predict(x)
-        return model.predict(np.nan_to_num(x, nan=0.0))
+        return model.predict(np.nan_to_num(x, nan=-1.0))
 
     def predict(self, features):
         requested = getattr(features, "last_requested_energy_kwh", None)
