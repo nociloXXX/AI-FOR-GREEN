@@ -280,18 +280,18 @@ class PredictionModule:
             weights = _sample_weights(frame.day, _HALF_LIFE[site])
 
             if site == "office1":
-                self.demand_model[site] = _fit_hist_quantile_avg(
-                    x, frame.demand_kwh.to_numpy(), 0.5, False, weights
-                )
-                self.dwell_model[site] = _fit_hist_quantile_avg(
-                    x, frame.dwell_hours.to_numpy(), 0.5, True, weights
-                )
-                base = _features_base(
+                xb = _features_base(
                     frame.hour, frame.weekday, frame.charger_limit_kw
                 )
-                norms = np.linalg.norm(base, axis=1, keepdims=True) + 1e-9
+                self.demand_model[site] = _fit_hist_quantile(
+                    xb, frame.demand_kwh.to_numpy(), 0.5, False, None, 0
+                )
+                self.dwell_model[site] = _fit_hist_quantile(
+                    xb, frame.dwell_hours.to_numpy(), 0.5, True, None, 0
+                )
+                norms = np.linalg.norm(xb, axis=1, keepdims=True) + 1e-9
                 self._office_knn = {
-                    "X": base / norms,
+                    "X": xb / norms,
                     "demand": frame.demand_kwh.to_numpy(),
                     "dwell": frame.dwell_hours.to_numpy(),
                 }
@@ -351,21 +351,27 @@ class PredictionModule:
             None if not use_request else round(float(requested), 3),
         )
         if key not in self._cache:
-            request_filled = (
-                float(requested) if use_request else self.request_medians[features.site]
-            )
-            request_missing = 0.0 if use_request else 1.0
-            x = _features_full(
-                [features.hour], [features.weekday], [features.charger_limit_kw],
-                [request_filled], [request_missing],
-            )
+            if features.site == "office1":
+                x = _features_base(
+                    [features.hour], [features.weekday], [features.charger_limit_kw]
+                )
+            else:
+                request_filled = (
+                    float(requested) if use_request else self.request_medians[features.site]
+                )
+                request_missing = 0.0 if use_request else 1.0
+                x = _features_full(
+                    [features.hour], [features.weekday], [features.charger_limit_kw],
+                    [request_filled], [request_missing],
+                )
             demand = float(self._model_predict(self.demand_model[features.site], x)[0])
             dwell = float(self._model_predict(self.dwell_model[features.site], x)[0])
             if features.site == "office1" and self.KNN_WEIGHT > 0.0:
                 kd, kw = self._knn_estimate(features)
                 demand = (1.0 - self.KNN_WEIGHT) * demand + self.KNN_WEIGHT * kd
                 dwell = (1.0 - self.KNN_WEIGHT) * dwell + self.KNN_WEIGHT * kw
-            demand = min(demand, float(features.charger_limit_kw) * dwell)
+            if features.site != "office1":
+                demand = min(demand, float(features.charger_limit_kw) * dwell)
             self._cache[key] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),
