@@ -1,7 +1,6 @@
 __pycache__/
 *.py[cod]
 
-# Local backup module (machine-specific, keep out of the public repo)
-backup/
+# Machine-specific local state (keep out of the public repo)
 .autosync/
 BACKUP_INFO.md
