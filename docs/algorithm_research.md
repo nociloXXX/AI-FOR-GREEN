@@ -341,3 +341,23 @@
 - module_3_world_model：未来到达按条件分位/经验分布注入，natural 与 capacity_edf 同采样。
 - module_5_decision：优先级改 LLF（laxity），价格延后只作用于正松弛车辆，并回归三站完成率。
 - module_1_data / module_4_intervention：本轮无新增。
+
+## 11. 当前最需要的论文方向清单（可执行版）
+
+> 给各模块会话直接照做；每条 = 论文方向/关键词 → 解决的当前问题 → 对应模块/文件 → 紧急度 → 剩余赛程内可落地的具体做法。
+
+1. Least Laxity First / deadline feasibility 调度 → 低容量下 just_in_time 压功率可能牺牲完成率，tight_ahead 只判“未来更紧”没保护“现在已紧” → `module_5_decision.py` → P0 → 排序键改为 `laxity = remaining_steps - remaining_energy/(charger_limit·dt)`；laxity 小者优先满充到 deadline 可完成；价格延后只作用于 laxity>0 且需求小的车；加“现在已紧”保护（剩余需求/剩余步数超阈值就立即满充）。改完跑 `public_self_eval.py` 逐站核对完成率。
+
+2. Deadline 约束下的 TOU / 价格感知充电优化 → 价格延后与完成率硬约束冲突 → `module_5_decision.py` → P0 → 先按 LLF 分配保完成基线功率，剩余容量/正松弛车辆再按电价梯度延后；绝不因价格延后 laxity≤0 的车；做成可开关后处理，完成率回退即关闭。参考 2022 分位预测 + 时移充电。
+
+3. 稀疏站点 / 迁移学习的 demand & dwell 预测 → office1 仅 919 行、last_requested 有效 0 条、demand MAE 6.24 → `module_2_prediction.py` → P0 → 全站 pooled LightGBM + `site` 特征共享底座，office1 输出向 pooled 中位数收缩（`α·site + (1-α)·pooled`，α 验证集选）；缺失分支不依赖 last_requested，改用条件经验分布/分位。
+
+4. 分位数回归 + 生存分析做 dwell/demand 不确定性量化 → dwell MAE 1.56h 偏高、单点预测无区间 → `module_2_prediction.py`、`module_3_world_model.py` → P1 → sklearn `HistGradientBoostingRegressor(loss="quantile")` 出 p50/p75/p90；dwell 偏右可试 log1p；生存分析/KM 仅离线诊断（lifelines 未预装，numpy 手写）。
+
+5. 容量干预反事实负荷预测 → 干预要求同时优于零效应与中位数双基线 → `module_4_intervention.py` → P1 → 与 natural 共用同一 rollout、同一需求/到达/离开采样；capacity_edf 用 EDF/LLF 一致策略；未来到达注入用条件分位情景；不复制 natural 压平效应。
+
+6. 完成率本地代理验证 → 世界模型还缺完成率回归 → `module_3_world_model.py` / `public_self_eval.py` → P1 → 本地回放逐站统计“剩余未交付 ≤ 3% 目标电量”车辆占比，核对 Caltech≥0.85 / JPL≥0.65 / Office≥0.85；改 act 后必跑。
+
+7. GMM 联合建模 arrival/duration/energy → 未来到达的 demand/dwell 联合分布 → `module_3_world_model.py` → P2 → sklearn `GaussianMixture` 条件抽样，有富余时间再做。
+
+执行顺序：1、3 先做（P0），2 紧随；4、5、6 为 P1；7 有富余再做。所有改动后必须跑一遍完成率代理验证，守住三站门槛。
