@@ -89,7 +89,8 @@ DWELL_SAFETY_FACTOR = 0.8
 DEMAND_SAFETY_FACTOR = 1.5
 
 # 价格延后总开关：False 时 act 退化为纯完成率优先的尽快充，便于 A/B。
-PRICE_DEFERRAL_ENABLED = True
+# 官方评测曾因价格延后把完成率拉低到 DQ，先默认关闭保资格。
+PRICE_DEFERRAL_ENABLED = False
 
 
 def act_edf(observation, predict_fn, price_deferral=None, dwell_fn=None):
