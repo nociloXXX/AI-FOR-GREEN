@@ -86,6 +86,10 @@ _SLACK_BUCKET_STEPS = 0.5
 # 权重更高；电价只影响削峰与成本，权重较低。
 _TOPSIS_WEIGHTS = np.array([0.45, 0.35, 0.20], dtype=float)
 
+# 电价延后的总开关：False 时 act 退化为纯完成率优先的满功率/必要功率分配，
+# 便于用公开自评做完成率 A/B，确认绿色调度没有拉低门槛。
+PRICE_DEFERRAL_ENABLED = True
+
 
 def _topsis_scores(matrix, weights):
     """对 n 辆车 x 3 个“越大越优先”指标做 TOPSIS 评分，返回 [0,1] 分数。"""
@@ -107,7 +111,7 @@ def _topsis_scores(matrix, weights):
     return np.where(denom > 1e-12, d_worst / np.maximum(denom, 1e-12), 0.5)
 
 
-def act_edf(observation, predict_fn):
+def act_edf(observation, predict_fn, price_deferral=None):
     """返回 {token: 请求功率 kW}，只操作当前连接且未完成的车辆。"""
     dt = _finite(observation.dt_hours, 0.25)
     if dt <= 0:
@@ -115,6 +119,9 @@ def act_edf(observation, predict_fn):
 
     prices = getattr(observation, "prices", ()) or ()
     cheap, tight_ahead = _green_signal(observation)
+    defer_enabled = (
+        PRICE_DEFERRAL_ENABLED if price_deferral is None else bool(price_deferral)
+    )
 
     rows = []
     for vehicle in observation.vehicles:
@@ -141,6 +148,7 @@ def act_edf(observation, predict_fn):
             score_remaining = limit * dt
             slack = 0.0
             wanted = limit
+            just_in_time = limit
         else:
             score_remaining = remaining
             demand_steps = remaining / (limit * dt)
@@ -148,10 +156,9 @@ def act_edf(observation, predict_fn):
             just_in_time = remaining / (steps_left * dt)
             if slack <= 0:
                 wanted = limit
-            elif cheap or tight_ahead:
-                wanted = limit
             else:
-                wanted = min(just_in_time, limit)
+                # 基础分配：完成率优先，按桩上限尽快充，最后一小段自然收尾。
+                wanted = min(limit, remaining / dt)
             wanted = min(max(wanted, 0.0), limit)
 
         rows.append(
@@ -160,6 +167,9 @@ def act_edf(observation, predict_fn):
                 "wanted": wanted,
                 "steps_left": steps_left,
                 "slack": slack,
+                "discover": discover,
+                "just_in_time": just_in_time,
+                "limit": limit,
                 "criteria": (
                     score_remaining,
                     1.0 / steps_left,
@@ -167,6 +177,13 @@ def act_edf(observation, predict_fn):
                 ),
             }
         )
+
+    # 后处理：电价延后（可开关）。只对仍有富余 slack 的车辆，在当前电价不便宜
+    # 且未来容量不紧时，把功率降到按时完成所需的最小值，让位削峰。
+    if defer_enabled:
+        for row in rows:
+            if not row["discover"] and row["slack"] > 0 and not (cheap or tight_ahead):
+                row["wanted"] = min(row["just_in_time"], row["limit"])
 
     if not rows:
         return {}

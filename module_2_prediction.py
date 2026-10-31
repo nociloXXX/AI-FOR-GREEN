@@ -63,6 +63,21 @@ def _fit_booster(x, y, num_leaves):
     return model.booster_
 
 
+def _fit_extra_trees(x, y):
+    """LightGBM 不可用时保留的 ExtraTrees 基线（单目标）。"""
+    from sklearn.ensemble import ExtraTreesRegressor
+
+    model = ExtraTreesRegressor(
+        n_estimators=96,
+        min_samples_leaf=15,
+        max_depth=12,
+        n_jobs=1,
+        random_state=20261008,
+    )
+    model.fit(np.nan_to_num(x, nan=0.0), y)
+    return model
+
+
 def _load_booster(path):
     import lightgbm as lgb
 
@@ -143,7 +158,18 @@ class PredictionModule:
         try:
             return _load_booster(path)
         except Exception:
+            pass
+        try:
             return _fit_booster(x, y, num_leaves)
+        except Exception:
+            return _fit_extra_trees(x, y)
+
+    @staticmethod
+    def _model_predict(model, x):
+        # LightGBM Booster 原生处理 NaN；ExtraTrees 需要把 NaN 置 0。
+        if hasattr(model, "num_feature"):
+            return model.predict(x)
+        return model.predict(np.nan_to_num(x, nan=0.0))
 
     def predict(self, features):
         requested = getattr(features, "last_requested_energy_kwh", None)
@@ -163,8 +189,8 @@ class PredictionModule:
                 [features.charger_limit_kw],
                 [np.nan if requested is None else float(requested)],
             )
-            demand = float(self.demand[features.site].predict(x)[0])
-            dwell = float(self.dwell[features.site].predict(x)[0])
+            demand = float(self._model_predict(self.demand[features.site], x)[0])
+            dwell = float(self._model_predict(self.dwell[features.site], x)[0])
             self._cache[key] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),

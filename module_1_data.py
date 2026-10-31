@@ -52,29 +52,17 @@ def load_training(data_dir=None, sites=("caltech", "jpl", "office1")):
     return training
 
 
-def make_features(hour, weekday, pmax, requested=None):
+def make_features(hour, weekday, pmax):
     """构造需求/停留回归特征。
 
-    固定输出 9 列，训练与预测两端一致：24h/12h 周期编码、星期、是否周末、
-    桩功率上限、是否有最后申报电量、最后申报电量本身。``requested`` 为
-    last_requested_energy_kwh，缺失时按 0 编码并配 has_requested=0，不把
-    缺失值当成 0 的真实含义。即使调用方只传 3 个参数，列数也保持不变。
+    固定输出 7 列，训练与预测两端一致：24h/12h 周期编码、星期、是否周末、
+    桩功率上限。不使用 last_requested_energy_kwh，因为训练截止前该字段
+    基本全为 null，且评测时未来车辆通常也缺失。
     """
     hour = np.asarray(hour, dtype=float).reshape(-1)
     weekday = np.asarray(weekday, dtype=float).reshape(-1)
     pmax = np.asarray(pmax, dtype=float).reshape(-1)
 
-    if requested is None:
-        requested = np.full_like(hour, np.nan)
-    else:
-        requested = np.asarray(requested, dtype=float).reshape(-1)
-
-    requested_clean = np.where(
-        np.isfinite(requested) & (requested > 0.0), requested, 0.0
-    )
-    has_requested = np.where(
-        np.isfinite(requested) & (requested > 0.0), 1.0, 0.0
-    )
     hour = hour % 24.0
     return np.column_stack(
         [
@@ -85,20 +73,28 @@ def make_features(hour, weekday, pmax, requested=None):
             weekday,
             (weekday >= 5.0).astype(float),
             pmax,
-            has_requested,
-            requested_clean,
         ]
     )
 
 
-def _smooth_hours(counts):
-    """对 24 小时计数做环形 3 点平滑，保持一天总到达数不变。"""
+def _laplace_hour_rates(counts, days, alpha):
+    """对每组（星期或工作日/周末组）的 24 小时计数做拉普拉斯平滑。
+
+    平滑只改变小时分布的细节，保持该组每天总到达数不变；对没有观测的组
+    保持为 0，避免给 office1 这样的站点虚构周末到达。
+    """
     counts = np.asarray(counts, dtype=float)
-    if counts.shape[-1] < 3:
-        return counts.copy()
-    left = np.roll(counts, 1, axis=-1)
-    right = np.roll(counts, -1, axis=-1)
-    return 0.25 * left + 0.5 * counts + 0.25 * right
+    days = np.asarray(days, dtype=float)
+    alpha = max(float(alpha), 0.0)
+    out = np.zeros_like(counts)
+    for group in range(counts.shape[0]):
+        total = float(counts[group].sum())
+        if total <= 0:
+            continue
+        prob = (counts[group] + alpha) / (total + alpha * counts.shape[1])
+        daily_rate = total / max(days[group], 1.0)
+        out[group] = prob * daily_rate / 4.0
+    return out
 
 
 def _day_and_weekday_counts(frame):
@@ -126,8 +122,16 @@ def summarize_site(training):
     return labels
 
 
-def build_weekday_hour_rates(training):
-    """返回每个站点按星期x小时统计的到达率，单位：辆/15分钟步。"""
+def build_weekday_hour_rates(
+    training, laplace_alpha=1.0, collapse_weekday_weekend=None
+):
+    """返回每个站点按星期x小时统计的到达率，单位：辆/15分钟步。
+
+    先做星期×小时计数，再用拉普拉斯伪计数 ``laplace_alpha`` 平滑，避免
+    稀疏小时被估计成 0。``collapse_weekday_weekend`` 为 True 时把 7 个
+    星期折叠成“工作日/周末”两类；为 None 时只对没有周末观测的站点自动
+    折叠（如 office1），数据充足的站点保留 7 类。
+    """
     hour_rates = {}
     for site, frame in training.items():
         if frame is None or len(frame) == 0:
@@ -140,6 +144,23 @@ def build_weekday_hour_rates(training):
         weekdays = np.asarray(frame.weekday, dtype=int) % 7
         np.add.at(counts, (weekdays, hours), 1.0)
 
-        smoothed = _smooth_hours(counts)
-        hour_rates[site] = smoothed / np.maximum(weekday_days[:, None], 1.0) / 4.0
+        if collapse_weekday_weekend is None:
+            collapse = counts[5:7].sum() == 0
+        else:
+            collapse = bool(collapse_weekday_weekend)
+
+        if collapse:
+            group_counts = np.stack(
+                [counts[:5].sum(axis=0), counts[5:7].sum(axis=0)]
+            )
+            group_days = np.array(
+                [weekday_days[:5].sum(), weekday_days[5:7].sum()]
+            )
+            smoothed = _laplace_hour_rates(group_counts, group_days, laplace_alpha)
+            out = np.zeros((7, 24), dtype=float)
+            out[:5] = smoothed[0]
+            out[5:7] = smoothed[1]
+        else:
+            out = _laplace_hour_rates(counts, weekday_days, laplace_alpha)
+        hour_rates[site] = out
     return hour_rates
