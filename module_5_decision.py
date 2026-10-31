@@ -57,8 +57,12 @@ def _price_advantage(prices, steps_left):
     return float(np.median(future)) - current
 
 
-# 电价延后只在车辆还有至少这一步的富余时启用，完成率优先于成本。
-_PRICE_DEFER_MARGIN_STEPS = 1.0
+# 松弛时间不超过这一步数的车辆视为“紧迫”：保持满功率，不参与电价延后。
+_URGENT_SLACK_STEPS = 2.0
+
+# slack 粗排序步长：所有车先按 0.5 步分桶保住 least-slack 的完成率，
+# 桶内再用 TOPSIS（剩余需求、停留、电价）精排做多指标权衡。
+_SLACK_BUCKET_STEPS = 0.5
 
 # TOPSIS 指标权重：剩余需求、停留紧急性、电价价差。前两项决定完成率，
 # 权重更高；电价只影响削峰与成本，权重较低。
@@ -117,13 +121,16 @@ def act_edf(observation, predict_fn):
         discover = remaining < 0.05
         if discover:
             score_remaining = limit * dt
+            slack = 0.0
             wanted = limit
         else:
             score_remaining = remaining
             demand_steps = remaining / (limit * dt)
             slack = steps_left - demand_steps
             just_in_time = remaining / (steps_left * dt)
-            if slack <= 0 or slack < _PRICE_DEFER_MARGIN_STEPS or cheap:
+            if slack <= _URGENT_SLACK_STEPS:
+                wanted = limit
+            elif cheap:
                 wanted = limit
             else:
                 wanted = min(just_in_time, limit)
@@ -134,6 +141,7 @@ def act_edf(observation, predict_fn):
                 "token": vehicle.features.token,
                 "wanted": wanted,
                 "steps_left": steps_left,
+                "slack": slack,
                 "criteria": (
                     score_remaining,
                     1.0 / steps_left,
@@ -147,10 +155,13 @@ def act_edf(observation, predict_fn):
 
     matrix = np.array([row["criteria"] for row in rows], dtype=float)
     scores = _topsis_scores(matrix, _TOPSIS_WEIGHTS)
-    order = sorted(
-        range(len(rows)),
-        key=lambda idx: (-float(scores[idx]), rows[idx]["steps_left"]),
-    )
+
+    def sort_key(idx):
+        row = rows[idx]
+        bucket = math.floor(row["slack"] / _SLACK_BUCKET_STEPS)
+        return (bucket, -float(scores[idx]), row["steps_left"])
+
+    order = sorted(range(len(rows)), key=sort_key)
 
     power = {}
     capacity = _ev_capacity_kw(observation)
