@@ -141,6 +141,80 @@ def run_rich(train, held, model_name="hist", separate=True):
     return eval_mae(np.asarray(preds), held)
 
 
+def run_median(train, held):
+    med = {s: (f.demand_kwh.median(), f.dwell_hours.median()) for s, f in train.items()}
+    preds = [med[s] for s, _ in held]
+    return eval_mae(np.asarray(preds), held)
+
+
+def run_two_stage(train, held, model_name="xgb"):
+    import xgboost as xgb
+
+    def make():
+        return xgb.XGBRegressor(
+            n_estimators=400, learning_rate=0.05, max_depth=4,
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+            random_state=7, verbosity=0, n_jobs=1,
+        )
+
+    demand_models, dwell_models = {}, {}
+    for site, frame in train.items():
+        x = rich_features(
+            frame.hour, frame.weekday, frame.charger_limit_kw,
+            frame.last_requested_energy_kwh,
+        )
+        dm = make()
+        dm.fit(x, frame.demand_kwh)
+        demand_models[site] = dm
+        x2 = np.column_stack([x, dm.predict(x)])
+        wm = make()
+        wm.fit(x2, frame.dwell_hours)
+        dwell_models[site] = wm
+    preds = []
+    for site, r in held:
+        x = rich_features(
+            [r["hour"]], [r["weekday"]], [r["charger_limit_kw"]],
+            [r["last_requested_energy_kwh"]],
+        )
+        pdm = demand_models[site].predict(x)[0]
+        pdw = dwell_models[site].predict(np.column_stack([x, [pdm]]))[0]
+        preds.append([pdm, pdw])
+    return eval_mae(np.asarray(preds), held)
+
+
+def run_lgb_objective(train, held, obj="regression_l1"):
+    import lightgbm as lgb
+
+    demand_models, dwell_models = {}, {}
+    for site, frame in train.items():
+        x = rich_features(
+            frame.hour, frame.weekday, frame.charger_limit_kw,
+            frame.last_requested_energy_kwh,
+        )
+        dm = lgb.LGBMRegressor(
+            objective=obj, n_estimators=500, learning_rate=0.05, num_leaves=31,
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+            random_state=7, verbose=-1, n_jobs=1,
+        )
+        dm.fit(x, frame.demand_kwh)
+        wm = lgb.LGBMRegressor(
+            objective=obj, n_estimators=500, learning_rate=0.05, num_leaves=15,
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+            random_state=7, verbose=-1, n_jobs=1,
+        )
+        wm.fit(x, frame.dwell_hours)
+        demand_models[site] = dm
+        dwell_models[site] = wm
+    preds = []
+    for site, r in held:
+        x = rich_features(
+            [r["hour"]], [r["weekday"]], [r["charger_limit_kw"]],
+            [r["last_requested_energy_kwh"]],
+        )
+        preds.append([demand_models[site].predict(x)[0], dwell_models[site].predict(x)[0]])
+    return eval_mae(np.asarray(preds), held)
+
+
 def eda(training):
     for site, frame in training.items():
         print(site, len(frame), "days", frame.day.nunique())
@@ -161,9 +235,13 @@ def main():
     eda(training)
     train, held = split_time(training)
     print("train rows", sum(len(f) for f in train.values()), "held", len(held))
+    print("site-median MAE:", run_median(train, held))
     print("baseline ExtraTrees MAE:", run_baseline(train, held))
     for name in ("hist", "gbr", "lgb", "xgb"):
         print(name, "rich MAE:", run_rich(train, held, name))
+    print("xgb two-stage MAE:", run_two_stage(train, held))
+    print("lgb L1 MAE:", run_lgb_objective(train, held, "regression_l1"))
+    print("lgb L2 MAE:", run_lgb_objective(train, held, "regression_l2"))
 
 
 if __name__ == "__main__":
