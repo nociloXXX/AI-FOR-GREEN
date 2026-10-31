@@ -84,6 +84,7 @@ def _rollout_with_counts(
     capacity_fn,
     arrival_counts,
     priority_key=None,
+    injected_predict=None,
 ):
     """给定未来每步整数到达数，执行一条确定性物理推演路径。"""
     dt = max(_finite(observation.dt_hours, default=0.25), 1e-9)
@@ -119,9 +120,8 @@ def _rollout_with_counts(
             + int((observation.local_hour + step * dt) // 24)
         ) % 7
         for _ in range(int(arrival_counts[step])):
-            pred = predict_fn(
-                ArrivalFeatures("forecast", observation.site, hour, weekday, 6.6)
-            )
+            features = ArrivalFeatures("forecast", observation.site, hour, weekday, 6.6)
+            pred = (injected_predict or predict_fn)(features)
             demand = max(_finite(getattr(pred, "demand_kwh", 0.0)), 0.0)
             cars.append(
                 [
@@ -158,6 +158,8 @@ def rollout(
     capacity_fn,
     priority_key=None,
     arrival_quantiles=(0.25, 0.5, 0.75),
+    demand_quantiles=(0.5, 0.75, 0.9),
+    predict_quantiles_fn=None,
 ):
     """通用前向推演。
 
@@ -190,19 +192,26 @@ def rollout(
             observation, horizon, predict_fn, capacity_fn, counts, priority_key
         )
 
-    scenario_counts = _arrival_counts(
+    arrival_counts = _arrival_counts(
         observation, horizon_steps, arrival_rate_fn, arrival_quantiles
     )
+    levels = tuple(demand_quantiles or (0.5,))
     scenarios = [
         _rollout_with_counts(
             observation,
             horizon_steps,
             predict_fn,
             capacity_fn,
-            scenario_counts[level],
+            arrival_counts[arrival_level],
             priority_key,
+            injected_predict=(
+                None
+                if predict_quantiles_fn is None
+                else (lambda features, q=dq: predict_quantiles_fn(features)[q])
+            ),
         )
-        for level in arrival_quantiles
+        for arrival_level in arrival_quantiles
+        for dq in levels
     ]
     horizon = max(0, int(_finite(horizon_steps, default=0.0)))
     loads = [
@@ -216,7 +225,13 @@ def rollout(
     return {"ev_load_kw": loads, "active_count": active}
 
 
-def forecast_natural(observation, horizon_steps, predict_fn, arrival_rate_fn):
+def forecast_natural(
+    observation,
+    horizon_steps,
+    predict_fn,
+    arrival_rate_fn,
+    predict_quantiles_fn=None,
+):
     """自然充电推演：不施加站点容量限制，按桩功率上限充到完成或离开。"""
     return rollout(
         observation,
@@ -224,4 +239,5 @@ def forecast_natural(observation, horizon_steps, predict_fn, arrival_rate_fn):
         predict_fn,
         arrival_rate_fn,
         lambda _step: float("inf"),
+        predict_quantiles_fn=predict_quantiles_fn,
     )

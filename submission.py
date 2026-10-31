@@ -26,6 +26,9 @@ class FiveModuleModel:
     def predict(self, features):
         return self.prediction.predict(features)
 
+    def predict_quantiles(self, features, levels=(0.5, 0.75, 0.9)):
+        return self.prediction.predict_quantiles(features, levels)
+
     def arrival_rate(self, site, hour, weekday):
         return self.prediction.arrival_rate(site, hour, weekday)
 
@@ -35,10 +38,18 @@ class FiveModuleModel:
     def forecast(self, observation, horizon_steps, intervention):
         if intervention == "capacity_edf":
             return forecast_capacity_edf(
-                observation, horizon_steps, self.predict, self.arrival_rate
+                observation,
+                horizon_steps,
+                self.predict,
+                self.arrival_rate,
+                predict_quantiles_fn=self.predict_quantiles,
             )
         return forecast_natural(
-            observation, horizon_steps, self.predict, self.arrival_rate
+            observation,
+            horizon_steps,
+            self.predict,
+            self.arrival_rate,
+            predict_quantiles_fn=self.predict_quantiles,
         )
 
     def explain(self):

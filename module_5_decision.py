@@ -107,6 +107,7 @@ def act_edf(observation, predict_fn, price_deferral=None):
         if discover:
             laxity = 0.0
             wanted = limit
+            base = limit
             deferrable = False
         else:
             time_to_finish = remaining / (limit * dt)
@@ -126,6 +127,7 @@ def act_edf(observation, predict_fn, price_deferral=None):
                 "token": vehicle.features.token,
                 "laxity": laxity,
                 "wanted": wanted,
+                "base": base,
                 "necessary": necessary if not discover else limit,
                 "deferrable": deferrable,
                 "steps_left": steps_left,
@@ -135,17 +137,22 @@ def act_edf(observation, predict_fn, price_deferral=None):
     if not cars:
         return {}
 
+    capacity = _ev_capacity_kw(observation)
+    # 全局“现在已紧”硬条件：当前可用容量不足以让所有未完成车辆按自然满充
+    # 功率充电时，整个步禁用价格延后，避免把本就不足的容量留成浪费。
+    natural_demand = sum(car["base"] for car in cars)
+    now_tight = natural_demand > capacity
+
     # 第二阶段（价格延后，可开关）：只把正松弛车辆从完成基线降到必要功率；
     # 高价且未来容量富余的步不前冲，让位削峰。绝不延后 laxity <= margin 的车。
     if defer_enabled:
         for car in cars:
-            if car["deferrable"] and not (cheap or tight_ahead):
+            if car["deferrable"] and not (cheap or tight_ahead or now_tight):
                 car["wanted"] = car["necessary"]
 
     # LLF 分配：laxity 小者优先，每辆最多给 wanted，直到可用容量用完。
     order = sorted(cars, key=lambda car: (car["laxity"], car["steps_left"]))
     power = {}
-    capacity = _ev_capacity_kw(observation)
     for car in order:
         granted = min(car["wanted"], capacity)
         power[car["token"]] = granted

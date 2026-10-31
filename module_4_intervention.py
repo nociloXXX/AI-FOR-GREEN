@@ -57,7 +57,12 @@ def _priority_key(strategy, dt_hours):
 
 
 def forecast_capacity_edf(
-    observation, horizon_steps, predict_fn, arrival_rate_fn, strategy="edf"
+    observation,
+    horizon_steps,
+    predict_fn,
+    arrival_rate_fn,
+    strategy="edf",
+    predict_quantiles_fn=None,
 ):
     """capacity_edf 反事实推演：同一状态，仅容量条件改为容量内限流。
 
@@ -75,4 +80,5 @@ def forecast_capacity_edf(
         arrival_rate_fn,
         lambda step: capacities[step],
         priority_key=_priority_key(strategy, observation.dt_hours),
+        predict_quantiles_fn=predict_quantiles_fn,
     )

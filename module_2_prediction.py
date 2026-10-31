@@ -110,9 +110,32 @@ def _load_alpha():
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-        return float(data["demand"]), float(data["dwell"])
+        demand = data["demand"]
+        dwell = data["dwell"]
+        return (
+            float(demand["alpha"]),
+            float(demand["gamma"]),
+            float(dwell["alpha"]),
+            float(dwell["gamma"]),
+        )
     except Exception:
-        return 0.5, 0.5
+        return 0.5, 1.0, 0.5, 1.0
+
+
+def _quantile_ratios(values, levels=(0.5, 0.75, 0.9)):
+    """用站点训练标签的经验分位比，给单点预测加保守区间。"""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 20:
+        base = 1.0
+    else:
+        base = float(np.quantile(values, 0.5))
+    ratios = {}
+    for level in levels:
+        q = float(np.quantile(values, level)) if values.size >= 20 else base
+        ratio = q / max(base, 1e-9)
+        ratios[level] = float(np.clip(ratio, 1.0, 2.0))
+    return ratios
 
 
 def _build_arrival_rates(training):
@@ -214,9 +237,20 @@ class PredictionModule:
         self.dwell_pooled = self._load_or_fit_pooled(
             _WEIGHTS_DIR / "dwell_pooled.txt", training, "dwell_hours", 15
         )
-        self.alpha_demand, self.alpha_dwell = _load_alpha()
+        (
+            self.alpha_demand,
+            self.gamma_demand,
+            self.alpha_dwell,
+            self.gamma_dwell,
+        ) = _load_alpha()
 
         self.arrival_rates = _build_arrival_rates(training)
+        self.demand_ratios = {}
+        self.dwell_ratios = {}
+        for site in _SITES:
+            frame = training[site]
+            self.demand_ratios[site] = _quantile_ratios(frame.demand_kwh.to_numpy())
+            self.dwell_ratios[site] = _quantile_ratios(frame.dwell_hours.to_numpy())
         self._cache = {}
 
     def _load_or_fit_pooled(self, path, training, target, leaves):
@@ -279,8 +313,14 @@ class PredictionModule:
                     )
                     pooled_demand = float(self._model_predict(self.demand_pooled, xp)[0])
                     pooled_dwell = float(self._model_predict(self.dwell_pooled, xp)[0])
-                    demand = self.alpha_demand * demand + (1.0 - self.alpha_demand) * pooled_demand
-                    dwell = self.alpha_dwell * dwell + (1.0 - self.alpha_dwell) * pooled_dwell
+                    demand = self.gamma_demand * (
+                        self.alpha_demand * demand
+                        + (1.0 - self.alpha_demand) * pooled_demand
+                    )
+                    dwell = self.gamma_dwell * (
+                        self.alpha_dwell * dwell
+                        + (1.0 - self.alpha_dwell) * pooled_dwell
+                    )
             self._cache[key] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),
@@ -296,3 +336,21 @@ class PredictionModule:
         else:
             bin_idx = int(hour) % 24
         return float(table[weekday, bin_idx])
+
+    def predict_quantiles(self, features, levels=(0.5, 0.75, 0.9)):
+        """返回 {level: Prediction} 的分位需求/停留估计。
+
+        q50 复用现有单点预测，q75/q90 用站点训练标签的经验分位比放大，
+        给 LLF/EDF 与未来到达注入提供保守 deadline 与需求区间。
+        """
+        point = self.predict(features)
+        site = features.site
+        out = {}
+        for level in levels:
+            demand_ratio = self.demand_ratios[site].get(level, 1.0)
+            dwell_ratio = self.dwell_ratios[site].get(level, 1.0)
+            out[level] = Prediction(
+                float(np.clip(point.demand_kwh * demand_ratio, 0.01, 150.0)),
+                float(np.clip(point.dwell_hours * dwell_ratio, 0.25, 24.0)),
+            )
+        return out

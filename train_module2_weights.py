@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent
 WEIGHTS_DIR = ROOT / "weights"
 SITES = ("caltech", "jpl", "office1")
 SITE_INDEX = {site: i for i, site in enumerate(SITES)}
-ALPHA_GRID = (0.0, 0.3, 0.5, 0.7, 1.0)
+ALPHA_GRID = np.arange(0.0, 1.01, 0.01)
+GAMMA_GRID = np.arange(0.80, 1.21, 0.01)
 
 
 def features_base(hour, weekday, pmax):
@@ -104,12 +105,17 @@ def select_alpha(office, training, target):
     pooled_pred = pooled.predict(xp_val)
     truth = office_val[target].to_numpy()
 
+    blend = np.column_stack([site_pred, pooled_pred])
     best = None
     for alpha in ALPHA_GRID:
-        mae = float(np.abs(truth - (alpha * site_pred + (1.0 - alpha) * pooled_pred)).mean())
-        if best is None or mae < best[0]:
-            best = (mae, alpha)
-    return best[1]
+        mixed = alpha * site_pred + (1.0 - alpha) * pooled_pred
+        for gamma in GAMMA_GRID:
+            mae = float(np.abs(truth - gamma * mixed).mean())
+            if best is None or mae < best[0]:
+                best = (mae, float(alpha), float(gamma))
+    mae_site = float(np.abs(truth - site_pred).mean())
+    mae_pooled = float(np.abs(truth - pooled_pred).mean())
+    return best[1], best[2], mae_site, mae_pooled
 
 
 def main():
@@ -160,12 +166,27 @@ def main():
         WEIGHTS_DIR / "dwell_pooled.txt"
     )
 
-    alpha_demand = select_alpha(training["office1"], training, "demand_kwh")
-    alpha_dwell = select_alpha(training["office1"], training, "dwell_hours")
+    alpha_demand, gamma_demand, site_mae_d, pooled_mae_d = select_alpha(
+        training["office1"], training, "demand_kwh"
+    )
+    alpha_dwell, gamma_dwell, site_mae_w, pooled_mae_w = select_alpha(
+        training["office1"], training, "dwell_hours"
+    )
     with open(WEIGHTS_DIR / "office1_alpha.json", "w", encoding="utf-8") as fh:
-        json.dump({"demand": alpha_demand, "dwell": alpha_dwell}, fh)
+        json.dump(
+            {
+                "demand": {"alpha": alpha_demand, "gamma": gamma_demand},
+                "dwell": {"alpha": alpha_dwell, "gamma": gamma_dwell},
+            },
+            fh,
+        )
 
-    print("office1 alpha demand/dwell:", alpha_demand, alpha_dwell)
+    print("office1 demand: site-only MAE", round(site_mae_d, 4),
+          "| pooled MAE", round(pooled_mae_d, 4),
+          "| alpha", alpha_demand, "| gamma", gamma_demand)
+    print("office1 dwell: site-only MAE", round(site_mae_w, 4),
+          "| pooled MAE", round(pooled_mae_w, 4),
+          "| alpha", alpha_dwell, "| gamma", gamma_dwell)
     print("weights dir:", WEIGHTS_DIR)
     print("fit seconds:", round(time.time() - started, 2))
 
