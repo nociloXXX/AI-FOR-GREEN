@@ -160,6 +160,8 @@ def _build_arrival_rates(training):
 class PredictionModule:
     """车辆级需求/停留预测。"""
 
+    KNN_WEIGHT = 0.3
+
     def __init__(self, training):
         self.demand_with = {}
         self.dwell_with = {}
@@ -185,6 +187,12 @@ class PredictionModule:
                 self.dwell_fallback[site] = _fit_hist_quantile(
                     xb, frame.dwell_hours.to_numpy(), 0.5
                 )
+                norms = np.linalg.norm(xb, axis=1, keepdims=True) + 1e-9
+                self._office_knn = {
+                    "X": xb / norms,
+                    "demand": frame.demand_kwh.to_numpy(),
+                    "dwell": frame.dwell_hours.to_numpy(),
+                }
                 self.demand_with[site] = self.demand_fallback[site]
                 self.dwell_with[site] = self.dwell_fallback[site]
                 continue
@@ -273,6 +281,22 @@ class PredictionModule:
             return model.predict(x)
         return model.predict(np.nan_to_num(x, nan=-1.0))
 
+    def _knn_estimate(self, features, k=40):
+        """office1 的余弦近邻估计；近邻池只来自训练样本，不含未来。"""
+        x = _features_base(
+            [features.hour], [features.weekday], [features.charger_limit_kw]
+        )
+        x = x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-9)
+        sim = self._office_knn["X"] @ x[0]
+        idx = np.argsort(-sim)[:k]
+        weights = np.maximum(sim[idx], 0.0)
+        if weights.sum() <= 1e-12:
+            weights = np.ones(k)
+        weights /= weights.sum()
+        demand = float((weights * self._office_knn["demand"][idx]).sum())
+        dwell = float((weights * self._office_knn["dwell"][idx]).sum())
+        return demand, dwell
+
     def predict(self, features):
         requested = getattr(features, "last_requested_energy_kwh", None)
         use_request = _is_valid_request(requested)
@@ -297,6 +321,10 @@ class PredictionModule:
                 )
                 demand = float(self._model_predict(self.demand_fallback[features.site], x)[0])
                 dwell = float(self._model_predict(self.dwell_fallback[features.site], x)[0])
+                if features.site == "office1" and self.KNN_WEIGHT > 0.0:
+                    kd, kw = self._knn_estimate(features)
+                    demand = (1.0 - self.KNN_WEIGHT) * demand + self.KNN_WEIGHT * kd
+                    dwell = (1.0 - self.KNN_WEIGHT) * dwell + self.KNN_WEIGHT * kw
             self._cache[key] = Prediction(
                 float(np.clip(demand, 0.01, 150.0)),
                 float(np.clip(dwell, 0.25, 24.0)),

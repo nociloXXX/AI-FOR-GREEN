@@ -1,0 +1,155 @@
+{
+  "kind": "offline-perfect-baseline",
+  "sites": {
+    "caltech": {
+      "days": [
+        {
+          "day": "2018-09-11",
+          "vehicles": 106,
+          "natural_peak_kw": 330.0,
+          "alap_peak_kw": 122.8,
+          "offline_ceiling": 0.9811,
+          "online_real_completion_capacity_limited": 0.9057,
+          "online_real_completion_normal": 0.9434,
+          "online_perfect_completion_capacity_limited": 0.9811
+        },
+        {
+          "day": "2018-10-02",
+          "vehicles": 104,
+          "natural_peak_kw": 303.6,
+          "alap_peak_kw": 179.6,
+          "offline_ceiling": 0.9808,
+          "online_real_completion_capacity_limited": 0.9615,
+          "online_real_completion_normal": 0.9615,
+          "online_perfect_completion_capacity_limited": 0.9808
+        },
+        {
+          "day": "2018-09-25",
+          "vehicles": 103,
+          "natural_peak_kw": 316.8,
+          "alap_peak_kw": 158.5,
+          "offline_ceiling": 0.9903,
+          "online_real_completion_capacity_limited": 0.9612,
+          "online_real_completion_normal": 0.9612,
+          "online_perfect_completion_capacity_limited": 0.9903
+        },
+        {
+          "day": "2018-10-31",
+          "vehicles": 100,
+          "natural_peak_kw": 297.0,
+          "alap_peak_kw": 99.3,
+          "offline_ceiling": 1.0,
+          "online_real_completion_capacity_limited": 1.0,
+          "online_real_completion_normal": 1.0,
+          "online_perfect_completion_capacity_limited": 1.0
+        }
+      ],
+      "mean_offline_ceiling": 0.988,
+      "mean_online_real_completion_capacity_limited": 0.9571,
+      "mean_online_real_completion_normal": 0.9665,
+      "mean_online_perfect_completion_capacity_limited": 0.988,
+      "mean_natural_peak_kw": 311.85,
+      "mean_alap_peak_kw": 140.0563
+    },
+    "jpl": {
+      "days": [
+        {
+          "day": "2019-05-03",
+          "vehicles": 86,
+          "natural_peak_kw": 349.8,
+          "alap_peak_kw": 217.7,
+          "offline_ceiling": 0.9884,
+          "online_real_completion_capacity_limited": 0.9884,
+          "online_real_completion_normal": 0.9884,
+          "online_perfect_completion_capacity_limited": 0.9884
+        },
+        {
+          "day": "2019-12-19",
+          "vehicles": 84,
+          "natural_peak_kw": 349.8,
+          "alap_peak_kw": 198.0,
+          "offline_ceiling": 1.0,
+          "online_real_completion_capacity_limited": 1.0,
+          "online_real_completion_normal": 1.0,
+          "online_perfect_completion_capacity_limited": 1.0
+        },
+        {
+          "day": "2019-10-02",
+          "vehicles": 83,
+          "natural_peak_kw": 356.4,
+          "alap_peak_kw": 205.2,
+          "offline_ceiling": 0.988,
+          "online_real_completion_capacity_limited": 0.988,
+          "online_real_completion_normal": 0.988,
+          "online_perfect_completion_capacity_limited": 0.988
+        },
+        {
+          "day": "2019-07-24",
+          "vehicles": 82,
+          "natural_peak_kw": 349.8,
+          "alap_peak_kw": 199.6,
+          "offline_ceiling": 1.0,
+          "online_real_completion_capacity_limited": 1.0,
+          "online_real_completion_normal": 1.0,
+          "online_perfect_completion_capacity_limited": 1.0
+        }
+      ],
+      "mean_offline_ceiling": 0.9941,
+      "mean_online_real_completion_capacity_limited": 0.9941,
+      "mean_online_real_completion_normal": 0.9941,
+      "mean_online_perfect_completion_capacity_limited": 0.9941,
+      "mean_natural_peak_kw": 351.45,
+      "mean_alap_peak_kw": 205.114
+    },
+    "office1": {
+      "days": [
+        {
+          "day": "2019-12-09",
+          "vehicles": 14,
+          "natural_peak_kw": 46.2,
+          "alap_peak_kw": 25.1,
+          "offline_ceiling": 1.0,
+          "online_real_completion_capacity_limited": 0.9286,
+          "online_real_completion_normal": 1.0,
+          "online_perfect_completion_capacity_limited": 1.0
+        },
+        {
+          "day": "2019-10-18",
+          "vehicles": 11,
+          "natural_peak_kw": 39.6,
+          "alap_peak_kw": 33.0,
+          "offline_ceiling": 1.0,
+          "online_real_completion_capacity_limited": 1.0,
+          "online_real_completion_normal": 1.0,
+          "online_perfect_completion_capacity_limited": 1.0
+        },
+        {
+          "day": "2019-12-13",
+          "vehicles": 11,
+          "natural_peak_kw": 46.2,
+          "alap_peak_kw": 33.0,
+          "offline_ceiling": 1.0,
+          "online_real_completion_capacity_limited": 1.0,
+          "online_real_completion_normal": 1.0,
+          "online_perfect_completion_capacity_limited": 1.0
+        },
+        {
+          "day": "2019-08-13",
+          "vehicles": 10,
+          "natural_peak_kw": 46.2,
+          "alap_peak_kw": 32.2,
+          "offline_ceiling": 1.0,
+          "online_real_completion_capacity_limited": 1.0,
+          "online_real_completion_normal": 1.0,
+          "online_perfect_completion_capacity_limited": 1.0
+        }
+      ],
+      "mean_offline_ceiling": 1.0,
+      "mean_online_real_completion_capacity_limited": 0.9821,
+      "mean_online_real_completion_normal": 1.0,
+      "mean_online_perfect_completion_capacity_limited": 1.0,
+      "mean_natural_peak_kw": 44.55,
+      "mean_alap_peak_kw": 30.812
+    }
+  }
+}
