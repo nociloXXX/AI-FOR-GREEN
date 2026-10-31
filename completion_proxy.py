@@ -106,7 +106,14 @@ def _apply_condition(vehicles, condition):
             out.append(copy)
         return out
     if condition == "demand_shift":
-        return [{**veh, "target": veh["target"] * 1.35} for veh in vehicles]
+        out = []
+        for veh in vehicles:
+            shifted = dict(veh)
+            # 官方口径：需求 x1.35 后再按实际可服务窗口与额定功率裁剪。
+            window_kwh = veh["limit"] * (veh["depart"] - veh["arrive"]) * DT
+            shifted["target"] = min(veh["target"] * 1.35, window_kwh)
+            out.append(shifted)
+        return out
     return list(vehicles)
 
 

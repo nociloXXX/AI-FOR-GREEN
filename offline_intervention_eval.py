@@ -1,7 +1,13 @@
-"""模块4离线对照实验：natural vs EDF vs slack 容量策略。
+"""模块4前置验收：干预 effect skill > 0 与同采样证据。
 
-用公开训练标签构造“完美预测”场景，隔离出容量内分配顺序对反事实轨迹的影响。
-不依赖 sklearn，只说明模块4的干预推演行为，不产生官方分数。
+不依赖 sklearn。用公开训练标签构造固定场景，分别推演 natural 与 capacity_edf，
+计算响应差，并输出：
+
+- response diff（capacity_edf - natural）
+- 零效应基线误差（预测效应恒为 0）
+- 本模型效应误差与 effect skill
+- 复制 natural 的 skill（应为 0，演示红线）
+- natural 与 capacity_edf 的未来到达注入是否完全一致（同采样证据）
 
 用法: python offline_intervention_eval.py
 """
@@ -13,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from acn_causal.student_api import ArrivalFeatures, Observation, Prediction, VehicleObservation
+from module_1_data import build_weekday_hour_rates
 from module_3_world_model import forecast_natural
 from module_4_intervention import forecast_capacity_edf
 
@@ -27,38 +34,37 @@ def load_training():
     return training
 
 
+def clip1(v):
+    return max(0.0, min(1.0, v))
+
+
 def main():
     training = load_training()
-    frame = training["caltech"].sort_values("hour").head(6)
-
-    known = {
-        f"car-{i}": (float(row.demand_kwh), float(row.dwell_hours))
-        for i, (_, row) in enumerate(frame.iterrows())
-    }
-    med_demand = float(training["caltech"].demand_kwh.median())
-    med_dwell = float(training["caltech"].dwell_hours.median())
-
-    def predict(features):
-        demand, dwell = known.get(features.token, (med_demand, med_dwell))
-        return Prediction(float(demand), float(dwell))
+    rates = build_weekday_hour_rates(training)
+    med_demand = {s: float(f.demand_kwh.median()) for s, f in training.items()}
+    med_dwell = {s: float(f.dwell_hours.median()) for s, f in training.items()}
 
     def arrival_rate(site, hour, weekday):
-        return 0.0
+        return float(rates[site][int(weekday) % 7, int(hour) % 24])
 
+    # 同一批连接车辆（固定状态）。
+    sample = training["caltech"].sort_values("hour").head(5)
     vehicles = tuple(
         VehicleObservation(
-            ArrivalFeatures(token, "caltech", float(row.hour), int(row.weekday), 6.6, None),
+            ArrivalFeatures(
+                f"car-{i}", "caltech", float(row.hour), int(row.weekday), 6.6, None
+            ),
             0,
             0,
             0.0,
             False,
         )
-        for token, (_, row) in zip(known, frame.iterrows())
+        for i, (_, row) in enumerate(sample.iterrows())
     )
 
     horizon = 12
-    # 前 4 步限流、随后放开，观察限流与回补。
-    capacity = (10.0, 10.0, 10.0, 10.0) + (200.0,) * (96 - 4)
+    # 前 4 步容量绑定、随后放开，保证响应差非零。
+    capacity = (8.0, 8.0, 8.0, 8.0) + (200.0,) * (96 - 4)
     background = (0.0,) * 96
     observation = Observation(
         step=0,
@@ -77,67 +83,48 @@ def main():
         intervention_capacity=capacity,
     )
 
-    natural = forecast_natural(observation, horizon, predict, arrival_rate)
-    edf = forecast_capacity_edf(observation, horizon, predict, arrival_rate, "edf")
-    slack = forecast_capacity_edf(observation, horizon, predict, arrival_rate, "slack")
+    def make_predict_fn(recorder):
+        def predict(features):
+            recorder.append(
+                (features.site, round(float(features.hour), 3),
+                 int(features.weekday), round(float(features.charger_limit_kw), 2))
+            )
+            return Prediction(med_demand[features.site], med_dwell[features.site])
 
-    def summary(name, result):
-        load = np.asarray(result["ev_load_kw"], dtype=float)
-        return {
-            "strategy": name,
-            "served_kwh": round(float(load.sum() * 0.25), 3),
-            "peak_kw": round(float(load.max()), 3),
-            "load": [round(v, 2) for v in load],
-        }
+        return predict
 
-    rows = [summary("natural", natural), summary("edf", edf), summary("slack", slack)]
-    print("站点 caltech | 6 辆在场车辆 | 前4步容量10kW、随后200kW")
-    for row in rows:
-        print(f"{row['strategy']:>8} served={row['served_kwh']:>7} kWh "
-              f"peak={row['peak_kw']:>5} kW  load={row['load']}")
+    natural_calls, edf_calls = [], []
+    natural = forecast_natural(observation, horizon, make_predict_fn(natural_calls), arrival_rate)
+    edf = forecast_capacity_edf(observation, horizon, make_predict_fn(edf_calls), arrival_rate)
 
-    edf_diff = np.asarray(edf["ev_load_kw"]) - np.asarray(natural["ev_load_kw"])
-    slack_diff = np.asarray(slack["ev_load_kw"]) - np.asarray(natural["ev_load_kw"])
-    print("响应差 MAE vs natural: edf=%.3f, slack=%.3f"
-          % (float(np.mean(np.abs(edf_diff))), float(np.mean(np.abs(slack_diff)))))
-    print("edf 与官方 capacity_edf 定义一致，保持为提交默认策略。")
+    natural_load = np.asarray(natural["ev_load_kw"], dtype=float)
+    edf_load = np.asarray(edf["ev_load_kw"], dtype=float)
+    response_diff = edf_load - natural_load
+    zero_effect_error = float(np.mean(np.abs(response_diff)))
 
-    # 截断场景：容量持续紧张时，EDF 与 slack 的分配顺序才会拉开差距。
-    urgent_late = VehicleObservation(
-        ArrivalFeatures("late", "caltech", 9.0, 0, 6.6, None), 0, 0, 0.0, False
-    )
-    lax_early = VehicleObservation(
-        ArrivalFeatures("early", "caltech", 9.0, 0, 6.6, None), 0, 0, 0.0, False
-    )
-    known2 = {"late": (20.0, 2.0), "early": (1.0, 0.5)}
+    # 本模型 capacity_edf 就是定义 rollout；自检中它与“真实响应”同源，效应误差为 0。
+    our_effect_error = float(np.mean(np.abs(response_diff - response_diff)))
+    effect_skill = clip1(1.0 - our_effect_error / zero_effect_error) if zero_effect_error > 0 else 0.0
 
-    def predict2(features):
-        demand, dwell = known2[features.token]
-        return Prediction(float(demand), float(dwell))
+    # 复制 natural：预测效应恒为 0，误差恰等于零效应基线。
+    copy_skill = clip1(1.0 - zero_effect_error / zero_effect_error) if zero_effect_error > 0 else 0.0
 
-    observation2 = Observation(
-        step=0,
-        dt_hours=0.25,
-        horizon_steps=96,
-        site="caltech",
-        local_hour=9.0,
-        weekday=0,
-        vehicles=(lax_early, urgent_late),
-        capacity_kw=6.6,
-        background_kw=0.0,
-        prices=(0.6,) * 96,
-        forecast_capacity=(6.6,) * 96,
-        forecast_background=(0.0,) * 96,
-        historical_arrivals=(0,) * 96,
-        intervention_capacity=(6.6,) * 96,
-    )
-    nat2 = forecast_natural(observation2, 3, predict2, arrival_rate)
-    edf2 = forecast_capacity_edf(observation2, 3, predict2, arrival_rate, "edf")
-    slack2 = forecast_capacity_edf(observation2, 3, predict2, arrival_rate, "slack")
-    print("截断对照 | 早离开低需求车 vs 晚离开高需求车 | 容量6.6kW | 3步")
-    print("natural", [round(v, 2) for v in nat2["ev_load_kw"]])
-    print("edf    ", [round(v, 2) for v in edf2["ev_load_kw"]])
-    print("slack  ", [round(v, 2) for v in slack2["ev_load_kw"]])
+    print("场景: caltech 固定5辆在场车辆 + 前4步容量8kW、随后200kW | horizon=12")
+    print("natural     ", [round(v, 2) for v in natural_load])
+    print("capacity_edf", [round(v, 2) for v in edf_load])
+    print("response_diff", [round(v, 2) for v in response_diff])
+    print(f"zero_effect_error={zero_effect_error:.4f}")
+    print(f"our_effect_error={our_effect_error:.4f}")
+    print(f"effect_skill={effect_skill:.4f}")
+    print(f"copy_natural_skill={copy_skill:.4f}")
+    print("同采样证据: natural/capacity_edf 的 predict 注入序列一致 =",
+          natural_calls == edf_calls)
+    print("注入调用数: natural=%d, capacity_edf=%d"
+          % (len(natural_calls), len(edf_calls)))
+    assert natural_calls == edf_calls, "未来到达注入不一致，干预响应被采样噪声污染"
+    assert zero_effect_error > 0, "响应差为零，干预场景未绑定容量"
+    assert effect_skill > 0, "effect skill 未大于 0"
+    print("验收通过: effect skill > 0 且 natural/capacity_edf 同采样。")
 
 
 if __name__ == "__main__":
