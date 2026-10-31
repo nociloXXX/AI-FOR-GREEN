@@ -1038,9 +1038,12 @@ def _self_test() -> None:
 
     # 弃充口径：电池已满导致的“想要但不必给”不记弃充。
     tiny = StationState.build("full", 1, capacity_kw=100.0)
-    tiny.step([{"energy_kwh": 1.0, "max_power_kw": 22.0}], step_hours=0.25)
+    tiny_result = tiny.step(
+        [{"energy_kwh": 1.0, "max_power_kw": 22.0}], step_hours=0.25
+    )
     assert tiny.snapshot()["occupied_piles"] == 0
     assert tiny.snapshot()["queue_length"] == 0
+    assert tiny_result.curtailed_energy_kwh == 0.0
 
     # 容量受限时，削减的功率才会折算成弃充电量。
     limited = StationState.build("limited", 1, capacity_kw=5.0)

@@ -5,10 +5,10 @@
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from . import config as C
+from .evaluate import decision_metrics, forecast_metrics
 
 
 def load_artifacts(path=None):
@@ -28,37 +28,23 @@ def summarize(df):
         dispatch = group["dispatch_power_kw"].to_numpy(dtype=float)
         capacity = C.STATION_CAPACITY_KW.get(station, float(dispatch.max()))
 
-        mae = float(np.mean(np.abs(actual - pred)))
-        rmse = float(np.sqrt(np.mean((actual - pred) ** 2)))
-        nonzero = actual > 1e-6
-        mape = (
-            float(np.mean(np.abs((actual[nonzero] - pred[nonzero]) / actual[nonzero])) * 100)
-            if nonzero.any()
-            else 0.0
-        )
-        peak_actual = float(actual.max())
-        peak_dispatch = float(dispatch.max())
-        unmet_kwh = float(np.maximum(actual - dispatch, 0).sum() * step_hours)
-        total_kwh = float(actual.sum() * step_hours)
-        before_violations = int((actual > capacity).sum())
-        after_violations = int((dispatch > capacity).sum())
+        forecast = forecast_metrics(actual, pred)
+        decision = decision_metrics(actual, dispatch, capacity, step_hours)
 
         rows.append(
             {
                 "station": station,
-                "mae": round(mae, 2),
-                "rmse": round(rmse, 2),
-                "mape": round(mape, 1),
-                "peak_actual": round(peak_actual, 1),
-                "peak_dispatch": round(peak_dispatch, 1),
-                "capacity": round(capacity, 1),
-                "peak_reduction_pct": round(
-                    (peak_actual - peak_dispatch) / peak_actual * 100, 1
-                ),
-                "unmet_kwh": round(unmet_kwh, 1),
-                "total_kwh": round(total_kwh, 1),
-                "before_violations": before_violations,
-                "after_violations": after_violations,
+                "mae": round(forecast["mae"], 2),
+                "rmse": round(forecast["rmse"], 2),
+                "mape": round(forecast["mape"], 1),
+                "peak_actual": round(decision["peak_before_kw"], 1),
+                "peak_dispatch": round(decision["peak_after_kw"], 1),
+                "capacity": round(decision["capacity_kw"], 1),
+                "peak_reduction_pct": round(decision["peak_reduction_pct"], 1),
+                "unmet_kwh": round(decision["unmet_kwh"], 1),
+                "total_kwh": round(decision["total_energy_kwh"], 1),
+                "before_violations": decision["before_violations"],
+                "after_violations": decision["after_violations"],
             }
         )
     return rows

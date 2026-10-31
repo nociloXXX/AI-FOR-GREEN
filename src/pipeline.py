@@ -51,7 +51,9 @@ def run():
         print(
             f"[{station}] MAE={metrics['mae']:.2f} kW | "
             f"RMSE={metrics['rmse']:.2f} kW | "
-            f"peak={dec['peak_kw']:.1f} kW | "
+            f"MAPE={metrics['mape']:.1f}% | "
+            f"peak={dec['peak_after_kw']:.1f} kW | "
+            f"violations={dec['after_violations']} | "
             f"policy={plan_info.get('selected_strategy')}"
         )
 

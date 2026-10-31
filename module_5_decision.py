@@ -38,14 +38,15 @@ def _ev_capacity_kw(observation):
 def _green_signal(observation, horizon_steps=8):
     """返回 (当前是否便宜, 未来近期容量是否比现在更紧)。
 
-    便宜：当前价不高于今日剩余时段电价中位数。容量变紧：未来 horizon 步内
+    便宜：当前价不高于今日剩余时段的最低价（否则存在更便宜的延后时段）。
+    容量变紧：未来 horizon 步内
     的最小 EV 可用容量（forecast_capacity - forecast_background）低于当前值，
     此时即使电价不低也应提前多充，避免未来被容量卡住。
     """
     prices = getattr(observation, "prices", ()) or ()
     if prices:
         future = np.asarray([float(p) for p in prices[1:]], dtype=float)
-        cheap = future.size == 0 or float(prices[0]) <= float(np.median(future))
+        cheap = future.size == 0 or float(prices[0]) <= float(np.min(future))
     else:
         cheap = True
 

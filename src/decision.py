@@ -6,7 +6,7 @@
 - causal_load_shift    在线安全的削峰填谷，只向后看，不使用任何未来信息（默认）
 - greedy_priority      规则/贪心兜底（先到先充、低 SOC 优先、最早离场优先）
 - lp_load_shift        连续功率分配的“注水法”LP，全量离线分析专用，禁止在线使用
-- milp_schedule        开关桩/整数变量，优先 OR-Tools/PuLP，缺失时回退贪心
+- milp_schedule        开关桩/整数变量，优先 PuLP，其次 scipy HiGHS，缺失回退贪心
 - mpc_schedule         滚动优化，仅使用预测模块给到的未来一小段“预测值”，非真实数据
 - battery_arbitrage    储能峰谷套利 + 削峰，阈值改为因果滚动均值，带 SOC 与效率约束
 
@@ -458,8 +458,126 @@ def _milp_pulp(sessions, capacity_kw, step_minutes, priority):
     return plan, summary
 
 
+def _milp_scipy(sessions, capacity_kw, step_minutes, priority):
+    """用 scipy.optimize.milp（HiGHS）求解开关桩整数调度。
+
+    变量为每车每步的连续功率与 0/1 开关，目标是最小化未满足电量（高惩罚）
+    与开关次数；无可行解、超时或依赖缺失时回退到规则贪心。
+    """
+    try:
+        from scipy.optimize import Bounds, LinearConstraint, milp
+        from scipy.sparse import lil_matrix
+    except ImportError:
+        plan, summary = greedy_priority(sessions, capacity_kw, step_minutes, priority)
+        summary["solver"] = "greedy_fallback"
+        return plan, summary
+
+    step_hours = (step_minutes or C.STEP_MINUTES) / 60.0
+    rows = [_session_row(s, i) for i, s in enumerate(sessions)]
+    if not rows:
+        return {}, {**_empty_summary(priority), "solver": "scipy_milp"}
+
+    rows_by_idx = {r["idx"]: r for r in rows}
+    power_keys = [
+        (r["idx"], t)
+        for r in rows
+        for t in range(r["start_step"], r["end_step"])
+    ]
+    power_index = {key: i for i, key in enumerate(power_keys)}
+    n_power = len(power_keys)
+    n_on = n_power
+    n_unmet = len(rows)
+    on_offset = n_power
+    unmet_offset = n_power + n_on
+    n_vars = n_power + n_on + n_unmet
+
+    lb = np.zeros(n_vars)
+    ub = np.zeros(n_vars)
+    c = np.zeros(n_vars)
+    integrality = np.zeros(n_vars, dtype=int)
+
+    for key, i in power_index.items():
+        ub[i] = rows_by_idx[key[0]]["max_power_kw"]
+        on_i = on_offset + i
+        ub[on_i] = 1.0
+        integrality[on_i] = 1
+        c[on_i] = 1.0
+    for k, r in enumerate(rows):
+        unmet_i = unmet_offset + k
+        ub[unmet_i] = r["energy_kwh"]
+        c[unmet_i] = 1000.0
+
+    constraints = []
+
+    # 能量守恒：sum_t power*dt + unmet == energy_kwh。
+    for k, r in enumerate(rows):
+        row = lil_matrix((1, n_vars))
+        for t in range(r["start_step"], r["end_step"]):
+            row[0, power_index[(r["idx"], t)]] = step_hours
+        row[0, unmet_offset + k] = 1.0
+        constraints.append(LinearConstraint(row.tocsr(), r["energy_kwh"], r["energy_kwh"]))
+
+    # 每步容量。
+    t_min = min(r["start_step"] for r in rows)
+    t_max = max(r["end_step"] for r in rows)
+    for t in range(t_min, t_max):
+        row = lil_matrix((1, n_vars))
+        for r in rows:
+            if r["start_step"] <= t < r["end_step"]:
+                row[0, power_index[(r["idx"], t)]] = 1.0
+        constraints.append(LinearConstraint(row.tocsr(), -np.inf, float(capacity_kw)))
+
+    # 开关耦合：power <= max_power * on。
+    for key, i in power_index.items():
+        row = lil_matrix((1, n_vars))
+        row[0, i] = 1.0
+        row[0, on_offset + i] = -rows_by_idx[key[0]]["max_power_kw"]
+        constraints.append(LinearConstraint(row.tocsr(), -np.inf, 0.0))
+
+    try:
+        result = milp(
+            c,
+            integrality=integrality,
+            bounds=Bounds(lb, ub),
+            constraints=constraints,
+            options={"time_limit": 30.0, "mip_rel_gap": 1e-3},
+        )
+    except Exception:
+        result = None
+
+    if result is None or not getattr(result, "success", False) or result.x is None:
+        plan, summary = greedy_priority(sessions, capacity_kw, step_minutes, priority)
+        summary["solver"] = "greedy_fallback"
+        return plan, summary
+
+    x = result.x
+    plan = {}
+    served = defaultdict(float)
+    for key, i in power_index.items():
+        val = float(x[i])
+        if val > 1e-6:
+            plan.setdefault(key[1], {})[key[0]] = round(val, 4)
+            served[key[0]] += val * step_hours
+
+    key_fn = PRIORITY_KEYS.get(priority, PRIORITY_KEYS["low_soc_first"])
+    order = [r["idx"] for r in sorted(rows, key=key_fn)]
+    peak_kw = max((sum(v.values()) for v in plan.values()), default=0.0)
+    summary = {
+        "served_kwh": round(sum(served.values()), 3),
+        "unmet_kwh": round(
+            sum(r["energy_kwh"] for r in rows) - sum(served.values()), 3
+        ),
+        "violations": int(peak_kw > float(capacity_kw) + 1e-6),
+        "peak_kw": round(peak_kw, 3),
+        "order": order,
+        "priority": priority,
+        "solver": "scipy_milp",
+    }
+    return plan, summary
+
+
 def milp_schedule(sessions, capacity_kw, step_minutes=None, priority="low_soc_first"):
-    """开关桩/整数变量调度，优先 OR-Tools/PuLP，缺失时回退规则贪心。
+    """开关桩/整数变量调度：优先 PuLP，其次 scipy HiGHS，缺失回退规则贪心。
 
     返回 ``(plan, summary)``，summary 的 ``solver`` 字段记录实际求解器，
     便于路演解释该站为什么走整数求解还是规则兜底。
@@ -470,17 +588,20 @@ def milp_schedule(sessions, capacity_kw, step_minutes=None, priority="low_soc_fi
         solver = "pulp"
     except ImportError:
         try:
-            import ortools  # noqa: F401
+            from scipy.optimize import milp  # noqa: F401
 
-            solver = "ortools"
+            solver = "scipy_milp"
         except ImportError:
             solver = "greedy_fallback"
 
     if solver == "pulp":
         plan, summary = _milp_pulp(sessions, capacity_kw, step_minutes, priority)
+        summary["solver"] = "pulp"
+    elif solver == "scipy_milp":
+        plan, summary = _milp_scipy(sessions, capacity_kw, step_minutes, priority)
     else:
         plan, summary = greedy_priority(sessions, capacity_kw, step_minutes, priority)
-    summary["solver"] = solver
+        summary["solver"] = "greedy_fallback"
     return plan, summary
 
 
